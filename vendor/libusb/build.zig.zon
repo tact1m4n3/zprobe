@@ -1,0 +1,15 @@
+.{
+    .name = .libusb,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.15.1",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+    .dependencies = .{
+        .libusb = .{
+            .url = "git+https://github.com/libusb/libusb#c9f02b27b2696bf7fe267bfa0cac0a43c81c58b3",
+            .hash = "N-V-__8AABeZHAAChxF-Bmzh0VIn8toAfFF7wUjVwYlIexWn",
+        },
+    },
+}
