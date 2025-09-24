@@ -2,6 +2,7 @@ const std = @import("std");
 
 const ARM_DebugInterface = @This();
 
+const Timeout = @import("../Timeout.zig");
 pub const Mem_AP = @import("ARM_DebugInterface/Mem_AP.zig");
 
 allocator: std.mem.Allocator,
@@ -286,7 +287,21 @@ fn select_ap_and_ap_bank(adi: *ARM_DebugInterface, ap: AP_Address, address: u12)
     } else return error.NoActiveDP;
 }
 
-// SWJ Sequences (used in dp select). Should not access any registers using the functions.
+// SWJ Sequences (used in dp select).
+
+fn alert_sequence(adi: *ARM_DebugInterface) !void {
+    // >=8 cycles high
+    try adi.swj_sequence(8, 0xFF);
+
+    // 128-bit selection alert sequence
+    try adi.swj_sequence(64, 0x86852D95_6209F392);
+    try adi.swj_sequence(64, 0x19BC0EA2_E3DDAFE9);
+}
+
+fn line_reset_sequence(adi: *ARM_DebugInterface) !void {
+    // Line reset
+    try adi.swj_sequence(51, 0x0007FFFF_FFFFFFFF);
+}
 
 // https://open-cmsis-pack.github.io/Open-CMSIS-Pack-Spec/main/html/debug_description.html#debugPortSetup
 fn debug_port_setup(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
@@ -300,7 +315,7 @@ fn debug_port_setup(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
         std.log.debug("trying to setup debug port with address {f}... Attempt {}", .{ dp_address, i + 1 });
 
         // Line reset
-        try adi.swj_sequence(51, 0x0007FFFF_FFFFFFFF);
+        try adi.line_reset_sequence();
 
         switch (adi.active_protocol) {
             .swd => {
@@ -310,19 +325,17 @@ fn debug_port_setup(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
                     // > 50 cycles SWDIO/TMS High, at least 2 idle cycles (SWDIO/TMS Low).
                     // -> done in debug_port_connect
                 } else {
-                    // >=8 cycles high
-                    try adi.swj_sequence(8, 0xFF);
+                    // JTAG to dormant
+                    try adi.swj_sequence(31, 0x33BBBBBA);
 
-                    // 128-bit selection alert sequence
-                    try adi.swj_sequence(64, 0x86852D95_6209F392);
-                    try adi.swj_sequence(64, 0x19BC0EA2_E3DDAFE9);
+                    // alert sequence
+                    try adi.alert_sequence();
 
                     // 4 cycles low + SWD activation code
                     try adi.swj_sequence(12, 0x1A0);
 
                     // > 50 cycles SWDIO/TMS High, at least 2 idle cycles (SWDIO/TMS Low).
                     // -> done in debug_port_connect
-
                 }
             },
             .jtag => @panic("TODO"),
@@ -339,49 +352,6 @@ fn debug_port_setup(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
     } else return error.DebugPortSetupFailed;
 }
 
-fn debug_port_start(adi: *ARM_DebugInterface) !void {
-    std.log.debug("starting debug port...", .{});
-
-    // Switch to DP Register Bank 0
-    try adi.raw_reg_write(.dp, 0x8, 0x00000000);
-
-    // Read DP CTRL/STAT Register and check if CSYSPWRUPACK and CDBGPWRUPACK bits are set
-    const ctrl_stat_val = try adi.raw_reg_read(.dp, 0x4);
-    const is_powered_down = ctrl_stat_val & 0xA0000000 != 0xA0000000;
-
-    if (ctrl_stat_val & 0x000000B2 != 0) {
-        // Clear SWD-DP sticky error bits by writing to DP ABORT
-        try adi.raw_reg_write(.dp, 0x0, 0x0000001E);
-    }
-
-    if (is_powered_down) {
-        // Request Debug/System Power-Up
-        try adi.raw_reg_write(.dp, 0x4, 0x50000000);
-
-        // Wait for Power-Up Request to be acknowledged
-        const TRY_INTERVAL = 5 * std.time.ns_per_ms;
-        const TIMEOUT = 100 * std.time.ns_per_ms;
-
-        const start_time = try std.time.Instant.now();
-        while (try adi.raw_reg_read(.dp, 0x4) & 0xA0000000 != 0xA0000000) {
-            const now = try std.time.Instant.now();
-            if (now.since(start_time) > TIMEOUT) {
-                return error.DebugPowerUpTimeout;
-            }
-
-            std.Thread.sleep(TRY_INTERVAL);
-        }
-
-        // Init AP Transfer Mode, Transaction Counter, and Lane Mask (Normal Transfer Mode, Include all Byte Lanes)
-        try adi.raw_reg_write(.dp, 0x4, 0x50000F00);
-
-        // Clear WDATAERR, STICKYORUN, STICKYCMP, and STICKYERR bits of CTRL/STAT Register by write to ABORT register
-        try adi.raw_reg_write(.dp, 0x0, 0x0000001E);
-    }
-
-    std.log.debug("debug port ready", .{});
-}
-
 fn debug_port_connect(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
     std.log.debug("connecting to debug port with address {f}...", .{dp_address});
 
@@ -389,18 +359,12 @@ fn debug_port_connect(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
 
     // NOTE: SWD specific
 
-    const TRY_INTERVAL = 5 * std.time.ns_per_ms;
-    const TIMEOUT = 100 * std.time.ns_per_ms;
-
-    const start_time = try std.time.Instant.now();
+    const timeout: Timeout = try .init(.{
+        .after = 100 * std.time.ns_per_ms,
+        .sleep_per_tick_ns = 5 * std.time.ns_per_ms,
+    });
     while (true) {
-        const now = try std.time.Instant.now();
-        if (now.since(start_time) > TIMEOUT) {
-            return error.ConnectionTimeout;
-        }
-
-        // Line reset
-        try adi.swj_sequence(51, 0x0007FFFF_FFFFFFFF);
+        try adi.line_reset_sequence();
 
         // >=2 cycles low
         try adi.swj_sequence(3, 0b000);
@@ -420,7 +384,7 @@ fn debug_port_connect(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
             break;
         } else |_| {}
 
-        std.Thread.sleep(TRY_INTERVAL);
+        try timeout.tick();
     }
 
     // Clear WDATAERR, STICKYORUN, STICKYCMP, and STICKYERR bits of CTRL/STAT Register by write to ABORT register
@@ -452,6 +416,44 @@ fn debug_port_connect(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
     }
 
     std.log.debug("connected to debug port", .{});
+}
+
+fn debug_port_start(adi: *ARM_DebugInterface) !void {
+    std.log.debug("starting debug port...", .{});
+
+    // Switch to DP Register Bank 0
+    try adi.raw_reg_write(.dp, 0x8, 0x00000000);
+
+    // Read DP CTRL/STAT Register and check if CSYSPWRUPACK and CDBGPWRUPACK bits are set
+    const ctrl_stat_val = try adi.raw_reg_read(.dp, 0x4);
+    const is_powered_down = ctrl_stat_val & 0xA0000000 != 0xA0000000;
+
+    if (ctrl_stat_val & 0x000000B2 != 0) {
+        // Clear SWD-DP sticky error bits by writing to DP ABORT
+        try adi.raw_reg_write(.dp, 0x0, 0x0000001E);
+    }
+
+    if (is_powered_down) {
+        // Request Debug/System Power-Up
+        try adi.raw_reg_write(.dp, 0x4, 0x50000000);
+
+        // Wait for Power-Up Request to be acknowledged
+        const timeout: Timeout = try .init(.{
+            .after = 100 * std.time.ns_per_ms,
+            .sleep_per_tick_ns = 5 * std.time.ns_per_ms,
+        });
+        while (try adi.raw_reg_read(.dp, 0x4) & 0xA0000000 != 0xA0000000) {
+            try timeout.tick();
+        }
+
+        // Init AP Transfer Mode, Transaction Counter, and Lane Mask (Normal Transfer Mode, Include all Byte Lanes)
+        try adi.raw_reg_write(.dp, 0x4, 0x50000F00);
+
+        // Clear WDATAERR, STICKYORUN, STICKYCMP, and STICKYERR bits of CTRL/STAT Register by write to ABORT register
+        try adi.raw_reg_write(.dp, 0x0, 0x0000001E);
+    }
+
+    std.log.debug("debug port ready", .{});
 }
 
 pub const DP_RegisterAddress = struct {
@@ -660,203 +662,3 @@ pub fn AP_Register(reg_addr: u12, T: type) type {
         }
     };
 }
-
-// // https://open-cmsis-pack.github.io/Open-CMSIS-Pack-Spec/main/html/debug_description.html#debugPortSetup
-// fn debug_port_setup(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
-//     // A multidrop address implies SWD version 2 and dormant state.  In
-//     // cases where SWD version 2 is used but not multidrop addressing
-//     // (ex. ADIv6), the SWD version 1 sequence is attempted before trying
-//     // the SWD version 2 sequence.
-//     var is_v1: bool = dp_address == .default;
-//
-//     for (0..5) |i| {
-//         // Line reset
-//         try adi.vtable.swj_sequence(adi, 51, 0x0007FFFF_FFFFFFFF);
-//
-//         switch (adi.active_protocol) {
-//             .swd => {
-//                 if (is_v1) {
-//                     try adi.vtable.swj_sequence(adi, 16, 0xE79E);
-//
-//                     // > 50 cycles SWDIO/TMS High, at least 2 idle cycles (SWDIO/TMS Low).
-//                     // -> done in debug_port_connect
-//                 } else {
-//                     // >=8 cycles high
-//                     try adi.vtable.swj_sequence(adi, 8, 0xFF);
-//
-//                     // 128-bit selection alert sequence
-//                     try adi.vtable.swj_sequence(adi, 64, 0x86852D95_6209F392);
-//                     try adi.vtable.swj_sequence(adi, 64, 0x19BC0EA2_E3DDAFE9);
-//
-//                     // 4 cycles low + SWD activation code
-//                     try adi.vtable.swj_sequence(adi, 12, 0x1A0);
-//
-//                     // > 50 cycles SWDIO/TMS High, at least 2 idle cycles (SWDIO/TMS Low).
-//                     // -> done in debug_port_connect
-//
-//                 }
-//             },
-//             .jtag => @panic("TODO"),
-//         }
-//
-//         if (adi.debug_port_connect(dp_address)) |_| {
-//             break;
-//         } else |_| {
-//             if (is_v1 and i > 1) {
-//                 // If we've tried SWD version 1 and failed, try SWD version 2
-//                 is_v1 = false;
-//             }
-//         }
-//     } else return error.DebugPortSetupFailed;
-// }
-//
-// fn debug_port_start(adi: *ARM_DebugInterface) !void {
-//     if (adi.active_protocol == .jtag) @panic("TODO");
-//
-//     // Switch to DP Register Bank 0
-//     try adi.vtable.reg_write(adi, .dp, DP_Register.SELECT1.addr, @bitCast(DP_Register.types.SELECT_V1{
-//         .DPBANKSEL = 0,
-//     }));
-//
-//     // Read DP CTRL/STAT Register and check if CSYSPWRUPACK and CDBGPWRUPACK bits are set
-//     const initial_ctrl_stat: DP_Register.types.CTRL_STAT = @bitCast(try adi.vtable.reg_read(adi, .dp, DP_Register.CTRL_STAT.addr));
-//     const is_powered_down = initial_ctrl_stat.CDBGPWRUPACK == 0 or initial_ctrl_stat.CSYSPWRUPACK == 0;
-//
-//     // Check and clear sticky error bits
-//     if (initial_ctrl_stat.STICKYCMP != 0 or
-//         initial_ctrl_stat.STICKYORUN != 0 or
-//         initial_ctrl_stat.STICKYERR != 0 or
-//         initial_ctrl_stat.WDATAERR != 0)
-//     {
-//         // NOTE: SWD specific
-//         // Clear SWD-DP sticky error bits by writing to DP ABORT
-//         try adi.vtable.reg_write(adi, .dp, DP_Register.ABORT.addr, @bitCast(DP_Register.types.ABORT{
-//             .STKCMPCLR = 1,
-//             .STKERRCLR = 1,
-//             .WDERRCLR = 1,
-//             .ORUNDETECTCLR = 1,
-//         }));
-//     }
-//
-//     if (is_powered_down) {
-//         // Request Debug/System Power-Up
-//         try adi.vtable.reg_write(adi, .dp, DP_Register.CTRL_STAT.addr, @bitCast(DP_Register.types.CTRL_STAT{
-//             .CDBGPWRUPREQ = 1,
-//             .CSYSPWRUPREQ = 1,
-//         }));
-//
-//         // Wait for Power-Up Request to be acknowledged
-//         const TRY_INTERVAL = 5 * std.time.ns_per_ms;
-//         const TIMEOUT = 1000 * std.time.ns_per_ms;
-//
-//         const start_time = try std.time.Instant.now();
-//         while (true) {
-//             const now = try std.time.Instant.now();
-//             if (now.since(start_time) > TIMEOUT) {
-//                 return error.DebugPowerUpTimeout;
-//             }
-//
-//             const ctrl_stat: DP_Register.types.CTRL_STAT = @bitCast(try adi.vtable.reg_read(adi, .dp, DP_Register.CTRL_STAT.addr));
-//             if (ctrl_stat.CDBGPWRUPACK != 0 and ctrl_stat.CSYSPWRUPACK != 0) {
-//                 break;
-//             }
-//
-//             std.Thread.sleep(TRY_INTERVAL);
-//         }
-//
-//         // Init AP Transfer Mode, Transaction Counter, and Lane Mask (Normal Transfer Mode, Include all Byte Lanes)
-//         try adi.vtable.reg_write(adi, .dp, DP_Register.CTRL_STAT.addr, @bitCast(DP_Register.types.CTRL_STAT{
-//             .CDBGPWRUPREQ = 1,
-//             .CSYSPWRUPREQ = 1,
-//             .MASKLANE = 0b1111,
-//         }));
-//
-//         // NOTE: SWD specific
-//         // Clear WDATAERR, STICKYORUN, STICKYCMP, and STICKYERR bits of CTRL/STAT Register by write to ABORT register
-//         try adi.vtable.reg_write(adi, .dp, DP_Register.ABORT.addr, @bitCast(DP_Register.types.ABORT{
-//             .STKCMPCLR = 1,
-//             .STKERRCLR = 1,
-//             .WDERRCLR = 1,
-//             .ORUNDETECTCLR = 1,
-//         }));
-//     }
-//
-//     std.log.debug("Debug port ready", .{});
-// }
-//
-// fn debug_port_connect(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
-//     if (adi.active_protocol == .jtag) return;
-//
-//     // NOTE: SWD specific write targetsel
-//
-//     const TRY_INTERVAL = 5 * std.time.ns_per_ms;
-//     const TIMEOUT = 100 * std.time.ns_per_ms;
-//
-//     const start_time = try std.time.Instant.now();
-//     while (true) {
-//         const now = try std.time.Instant.now();
-//         if (now.since(start_time) > TIMEOUT) {
-//             return error.ConnectionTimeout;
-//         }
-//
-//         // Line reset
-//         try adi.vtable.swj_sequence(adi, 51, 0x0007FFFF_FFFFFFFF);
-//
-//         // >=2 cycles low
-//         try adi.vtable.swj_sequence(adi, 3, 0b000);
-//
-//         // Write to TARGETSEL (if multidrop).
-//         switch (dp_address) {
-//             .multidrop => |targetsel| {
-//                 const parity = @popCount(targetsel) % 2;
-//                 const data = (@as(u48, parity) << 45) | (@as(u48, targetsel) << 13) | 0x1F99;
-//                 try adi.vtable.swj_sequence(adi, 6 * 8, data);
-//             },
-//             else => {},
-//         }
-//
-//         // Read DPIDR to enable SWD interface (SW-DPv1 and SW-DPv2)
-//         if (adi.vtable.reg_read(adi, .dp, DP_Register.DPIDR.addr)) |_| {
-//             break;
-//         } else |_| {}
-//
-//         std.Thread.sleep(TRY_INTERVAL);
-//     }
-//
-//     // Clear WDATAERR, STICKYORUN, STICKYCMP, and STICKYERR bits of CTRL/STAT Register by write to ABORT register
-//     try adi.vtable.reg_write(adi, .dp, DP_Register.ABORT.addr, @bitCast(DP_Register.types.ABORT{
-//         .STKCMPCLR = 1,
-//         .STKERRCLR = 1,
-//         .WDERRCLR = 1,
-//         .ORUNDETECTCLR = 1,
-//     }));
-//
-//     // Check we are connected to the right DP (probe-rs)
-//     switch (dp_address) {
-//         .multidrop => |targetsel| {
-//             try adi.vtable.reg_write(adi, .dp, DP_Register.SELECT.addr, @bitCast(DP_Register.types.SELECT_V1{
-//                 .DPBANKSEL = DP_Register.TARGETID.bank.?,
-//             }));
-//             const target_id = try adi.vtable.reg_read(adi, .dp, DP_Register.TARGETID.addr);
-//
-//             try adi.vtable.reg_write(adi, .dp, DP_Register.SELECT.addr, @bitCast(DP_Register.types.SELECT_V1{
-//                 .DPBANKSEL = DP_Register.DLPIDR.bank.?,
-//             }));
-//             const dlpidr = try adi.vtable.reg_read(adi, .dp, DP_Register.DLPIDR.addr);
-//
-//             const TARGETID_MASK: u32 = 0x0FFF_FFFF;
-//             const DLPIDR_MASK: u32 = 0xF000_0000;
-//
-//             const targetid_match = (target_id & TARGETID_MASK) == (targetsel & TARGETID_MASK);
-//             const dlpdir_match = (dlpidr & DLPIDR_MASK) == (targetsel & DLPIDR_MASK);
-//             if (!targetid_match or !dlpdir_match) {
-//                 std.log.err("Target ID and DLPIDR do not match, failed to select debug port. Target ID: {x}, DLPIDR: {x}", .{
-//                     target_id,
-//                     dlpidr,
-//                 });
-//                 return error.WrongDP;
-//             }
-//         },
-//         else => {},
-//     }
-// }
