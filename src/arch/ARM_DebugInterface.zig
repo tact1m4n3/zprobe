@@ -167,7 +167,7 @@ fn select_dp(adi: *ARM_DebugInterface, allocator: std.mem.Allocator, dp_address:
     if (adi.active_dp_state) |state| {
         if (state.address.eql(dp_address)) return;
 
-        try adi.other_dp_states.put(allocator, dp_address, state);
+        try adi.other_dp_states.put(allocator, state.address, state);
         adi.active_dp_state = null;
 
         try adi.debug_port_connect(dp_address);

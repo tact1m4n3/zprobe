@@ -5,7 +5,7 @@ const Probe = @import("Probe.zig");
 const arch = @import("arch.zig");
 const cpu = @import("cpu.zig");
 const ARM_DebugInterface = @import("arch/ARM_DebugInterface.zig");
-// const chip = @import("chip.zig");
+const chip = @import("chip.zig");
 
 const DP_CORE0: ARM_DebugInterface.DP_Address = .{ .multidrop = 0x01002927 };
 const AP_CORE0: ARM_DebugInterface.AP_Address = .{
@@ -41,24 +41,10 @@ pub fn main() !void {
     try probe.attach(.mhz(1));
     defer probe.detach();
 
-    const adi = probe.arm_debug_interface() orelse return error.ADI_NotSupported;
+    var rp2040: chip.RP2040 = try .init(allocator, probe);
+    defer rp2040.deinit();
 
-    // reset system
-    try adi.dp_reg_write(RESCUE_DP, arch.ARM_DebugInterface.regs.dp.CTRL_STAT.addr, 0);
-    // after full chip reset, we should also reset the state
-    adi.state_reset();
-
-    var mem_ap: arch.ARM_DebugInterface.Mem_AP = try .init(allocator, adi, AP_CORE0);
-    const memory = mem_ap.memory();
-
-    const cortex_m: cpu.Cortex_M = try .init(memory);
-    defer cortex_m.deinit();
-
-    try cortex_m.halt();
-    try cortex_m.set_catch_reset(true);
-    try cortex_m.set_catch_fault(true);
-    try cortex_m.reset();
-    // after this the core should be reset and halted
+    try rp2040.system_reset();
 
     const elf_path = args[1];
     {
@@ -78,10 +64,10 @@ pub fn main() !void {
             const data = try elf_file_reader.interface.readAlloc(allocator, ph.p_filesz);
             defer allocator.free(data);
 
-            try memory.write(ph.p_paddr, data);
+            try rp2040.core0.memory.write(ph.p_paddr, data);
         }
 
-        try cortex_m.write_cpu_register(.debug_return_address, @truncate(header.entry));
-        try cortex_m.run();
+        try rp2040.core0.write_cpu_register(.debug_return_address, @truncate(header.entry));
+        try rp2040.core0.run();
     }
 }

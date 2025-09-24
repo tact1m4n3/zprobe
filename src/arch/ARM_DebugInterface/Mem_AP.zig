@@ -3,7 +3,6 @@ const std = @import("std");
 const ARM_DebugInterface = @import("../ARM_DebugInterface.zig");
 const AP_Address = ARM_DebugInterface.AP_Address;
 const AP_Register = ARM_DebugInterface.AP_Register;
-const Memory = @import("../../Memory.zig");
 
 const Mem_AP = @This();
 
@@ -17,6 +16,18 @@ support_large_data_ext: bool,
 current_access_size: AccessSize = .word,
 
 tmp_buf: [TAR_MAX_INCREMENT]u32 = undefined,
+
+pub const ReadError = error{
+    AddressMisaligned,
+    ReadFailed,
+    Unsupported,
+};
+
+pub const WriteError = error{
+    AddressMisaligned,
+    WriteFailed,
+    Unsupported,
+};
 
 // TAR auto-increment works with 10bits at minimum
 const TAR_MAX_INCREMENT = 1 << 10;
@@ -59,23 +70,12 @@ pub fn init(allocator: std.mem.Allocator, adi: *ARM_DebugInterface, ap_address: 
     };
 }
 
-pub fn memory(mem_ap: *Mem_AP) Memory {
-    return .{
-        .ptr = mem_ap,
-        .vtable = &.{
-            .read_u8 = read_u8,
-            .read_u16 = read_u16,
-            .read_u32 = read_u32,
-            // .read_u64 = read_u64,
-            .write_u8 = write_u8,
-            .write_u16 = write_u16,
-            .write_u32 = write_u32,
-            // .write_u64 = write_u64,
-
-            .read = read,
-            .write = write,
-        },
-    };
+pub fn reinit(mem_ap: *Mem_AP) !void {
+    try regs.CSW.modify(mem_ap.adi, mem_ap.address, .{
+        .SIZE = mem_ap.current_access_size,
+        .AddrInc = .single,
+        .DbgSwEnable = 1,
+    });
 }
 
 fn set_tar_address(mem_ap: Mem_AP, addr: u64) !void {
@@ -100,8 +100,7 @@ fn set_access_size(mem_ap: *Mem_AP, size: AccessSize) !void {
     mem_ap.current_access_size = size;
 }
 
-fn read_u8(ptr: *anyopaque, addr: u64, data: []u8) Memory.ReadError!void {
-    const mem_ap: *Mem_AP = @ptrCast(@alignCast(ptr));
+pub fn read_u8(mem_ap: *Mem_AP, addr: u64, data: []u8) ReadError!void {
     if (!mem_ap.support_other_sizes)
         return error.Unsupported;
 
@@ -130,8 +129,7 @@ fn read_u8(ptr: *anyopaque, addr: u64, data: []u8) Memory.ReadError!void {
     }
 }
 
-fn read_u16(ptr: *anyopaque, addr: u64, data: []u16) Memory.ReadError!void {
-    const mem_ap: *Mem_AP = @ptrCast(@alignCast(ptr));
+pub fn read_u16(mem_ap: *Mem_AP, addr: u64, data: []u16) ReadError!void {
     if (!mem_ap.support_other_sizes)
         return error.Unsupported;
     if (addr & 0x1 != 0) return error.AddressMisaligned;
@@ -160,8 +158,7 @@ fn read_u16(ptr: *anyopaque, addr: u64, data: []u16) Memory.ReadError!void {
     }
 }
 
-fn read_u32(ptr: *anyopaque, addr: u64, data: []u32) Memory.ReadError!void {
-    const mem_ap: *Mem_AP = @ptrCast(@alignCast(ptr));
+pub fn read_u32(mem_ap: *Mem_AP, addr: u64, data: []u32) ReadError!void {
     if (addr & 0x3 != 0) return error.AddressMisaligned;
 
     mem_ap.set_access_size(.word) catch return error.ReadFailed;
@@ -183,7 +180,7 @@ fn read_u32(ptr: *anyopaque, addr: u64, data: []u32) Memory.ReadError!void {
     }
 }
 
-// fn read_u64(ptr: *anyopaque, addr: u64, data: []u64) Memory.ReadError!void {
+// fn read_u64(ptr: *anyopaque, addr: u64, data: []u64) ReadError!void {
 //     const mem_ap: *Mem_AP = @ptrCast(@alignCast(ptr));
 //     if (!mem_ap.support_large_data_ext) return error.Unsupported;
 //
@@ -196,8 +193,7 @@ fn read_u32(ptr: *anyopaque, addr: u64, data: []u32) Memory.ReadError!void {
 //     mem_ap.adi.ap_reg_read_repeated(mem_ap.address, regs.DRW.addr, data) catch return error.ReadFailed;
 // }
 
-fn write_u8(ptr: *anyopaque, addr: u64, data: []const u8) Memory.WriteError!void {
-    const mem_ap: *Mem_AP = @ptrCast(@alignCast(ptr));
+pub fn write_u8(mem_ap: *Mem_AP, addr: u64, data: []const u8) WriteError!void {
     if (!mem_ap.support_other_sizes) return error.Unsupported;
 
     mem_ap.set_access_size(.byte) catch return error.WriteFailed;
@@ -223,8 +219,7 @@ fn write_u8(ptr: *anyopaque, addr: u64, data: []const u8) Memory.WriteError!void
     }
 }
 
-fn write_u16(ptr: *anyopaque, addr: u64, data: []const u16) Memory.WriteError!void {
-    const mem_ap: *Mem_AP = @ptrCast(@alignCast(ptr));
+pub fn write_u16(mem_ap: *Mem_AP, addr: u64, data: []const u16) WriteError!void {
     if (!mem_ap.support_other_sizes) return error.Unsupported;
     if (addr & 0x1 != 0) return error.AddressMisaligned;
 
@@ -250,8 +245,7 @@ fn write_u16(ptr: *anyopaque, addr: u64, data: []const u16) Memory.WriteError!vo
     }
 }
 
-fn write_u32(ptr: *anyopaque, addr: u64, data: []const u32) Memory.WriteError!void {
-    const mem_ap: *Mem_AP = @ptrCast(@alignCast(ptr));
+pub fn write_u32(mem_ap: *Mem_AP, addr: u64, data: []const u32) WriteError!void {
     if (addr & 0x3 != 0) return error.AddressMisaligned;
 
     mem_ap.set_access_size(.word) catch return error.WriteFailed;
@@ -272,7 +266,7 @@ fn write_u32(ptr: *anyopaque, addr: u64, data: []const u32) Memory.WriteError!vo
     }
 }
 
-// fn write_u64(ptr: *anyopaque, addr: u64, data: []const u64) Memory.WriteError!void {
+// fn write_u64(ptr: *anyopaque, addr: u64, data: []const u64) WriteError!void {
 //     const mem_ap: *Mem_AP = @ptrCast(@alignCast(ptr));
 //     if (!mem_ap.support_large_data_ext) return error.Unsupported;
 //
@@ -285,23 +279,21 @@ fn write_u32(ptr: *anyopaque, addr: u64, data: []const u32) Memory.WriteError!vo
 //     mem_ap.adi.ap_reg_write_repeated(mem_ap.address, regs.DRW.addr, data) catch return error.WriteFailed;
 // }
 
-pub fn read(ptr: *anyopaque, addr: u64, data: []u8) Memory.ReadError!void {
-    _ = ptr; // autofix
+pub fn read(mem_ap: *Mem_AP, addr: u64, data: []u8) ReadError!void {
+    _ = mem_ap; // autofix
     _ = addr; // autofix
     _ = data; // autofix
     @panic("TODO");
 }
 
-pub fn write(ptr: *anyopaque, addr: u64, data: []const u8) Memory.WriteError!void {
-    const mem_ap: *Mem_AP = @alignCast(@ptrCast(ptr));
-
+pub fn write(mem_ap: *Mem_AP, addr: u64, data: []const u8) WriteError!void {
     const bytes_before_start = std.mem.alignForward(u64, addr, 4) - addr;
     const bytes_until_end = addr + data.len - std.mem.alignBackward(u64, addr + data.len, 4);
 
     // if we have at least x aligned words (we should benchmark this)
     if (bytes_before_start + bytes_until_end + @sizeOf(u32) < data.len) {
         if (bytes_before_start > 0) {
-            try write_u8(ptr, addr, data[0..bytes_before_start]);
+            try mem_ap.write_u8(addr, data[0..bytes_before_start]);
         }
 
         const aligned_data_len = data.len - bytes_before_start - bytes_until_end;
@@ -313,18 +305,17 @@ pub fn write(ptr: *anyopaque, addr: u64, data: []const u8) Memory.WriteError!voi
                 word.* = std.mem.readInt(u32, data[bytes_before_start + i * @sizeOf(u32) ..][0..4], .little);
             }
 
-            try write_u32(ptr, addr + bytes_before_start, u32_data);
+            try mem_ap.write_u32(addr + bytes_before_start, u32_data);
         }
 
         if (bytes_until_end > 0) {
-            try write_u8(
-                ptr,
+            try mem_ap.write_u8(
                 addr + bytes_before_start + aligned_data_len,
                 data[data.len - bytes_until_end ..],
             );
         }
     } else {
-        try write_u8(ptr, addr, data);
+        try mem_ap.write_u8(addr, data);
     }
 }
 
