@@ -35,9 +35,8 @@ pub fn main() !void {
     _ = try libusb.call(libusb.c.libusb_init(null));
     defer libusb.c.libusb_exit(null);
 
-    var any_probe: Probe.Any = try .init(allocator, .{});
-    defer any_probe.deinit(allocator);
-    const probe = any_probe.probe();
+    var probe: Probe = try .create(allocator, .{});
+    defer probe.destroy();
 
     try probe.attach(.mhz(1));
     defer probe.detach();
@@ -49,7 +48,7 @@ pub fn main() !void {
     // after full chip reset, we should also reset the state
     adi.state_reset();
 
-    var mem_ap: arch.ARM_DebugInterface.Mem_AP = try .init(adi, AP_CORE0);
+    var mem_ap: arch.ARM_DebugInterface.Mem_AP = try .init(allocator, adi, AP_CORE0);
     const memory = mem_ap.memory();
 
     const cortex_m: cpu.Cortex_M = try .init(memory);
@@ -79,7 +78,7 @@ pub fn main() !void {
             const data = try elf_file_reader.interface.readAlloc(allocator, ph.p_filesz);
             defer allocator.free(data);
 
-            try memory.write(allocator, ph.p_paddr, data);
+            try memory.write(ph.p_paddr, data);
         }
 
         try cortex_m.write_cpu_register(.debug_return_address, @truncate(header.entry));

@@ -17,29 +17,32 @@ adi: ARM_DebugInterface,
 
 // TODO: implement read/write repeated functions
 
-pub fn init(allocator: std.mem.Allocator, filter: libusb.DeviceIterator.Filter) !CMSIS_DAP {
+pub fn create(allocator: std.mem.Allocator, filter: libusb.DeviceIterator.Filter) !*CMSIS_DAP {
     var device_it: libusb.DeviceIterator = try libusb.DeviceIterator.init(filter);
     defer device_it.deinit();
 
     while (try device_it.next()) |device| {
-        return init_with_device(allocator, device) catch |err| switch (err) {
+        return create_with_device(allocator, device) catch |err| switch (err) {
             error.InvalidDevice => continue,
             else => return err,
         };
     } else return error.NoDeviceFound;
 }
 
-pub fn init_with_device(
+pub fn create_with_device(
     allocator: std.mem.Allocator,
     device: ?*c.struct_libusb_device,
-) !CMSIS_DAP {
+) !*CMSIS_DAP {
     const dev: CMSIS_DAP_Device = try .init(device);
     errdefer dev.deinit();
 
     const buf = try allocator.alloc(u8, dev.packet_size);
     errdefer allocator.free(buf);
 
-    return .{
+    const cmsis_dap: *CMSIS_DAP = try allocator.create(CMSIS_DAP);
+    errdefer allocator.destroy(cmsis_dap);
+
+    cmsis_dap.* = .{
         .dev = dev,
         .buf = buf,
         .adi = .{
@@ -52,22 +55,31 @@ pub fn init_with_device(
             .active_protocol = .swd,
         },
     };
+
+    return cmsis_dap;
 }
 
-pub fn deinit(cmsis_dap: CMSIS_DAP, allocator: std.mem.Allocator) void {
-    allocator.free(cmsis_dap.buf);
+pub fn destroy(cmsis_dap: *CMSIS_DAP) void {
+    cmsis_dap.adi.allocator.free(cmsis_dap.buf);
     cmsis_dap.dev.deinit();
+    cmsis_dap.adi.allocator.destroy(cmsis_dap);
 }
 
 pub fn probe(cmsis_dap: *CMSIS_DAP) Probe {
     return .{
         .ptr = cmsis_dap,
         .vtable = &.{
+            .destroy = destroy_erased,
             .attach = attach,
             .detach = detach,
             .arm_debug_interface = arm_debug_interface,
         },
     };
+}
+
+fn destroy_erased(ptr: *anyopaque) void {
+    const cmsis_dap: *CMSIS_DAP = @ptrCast(@alignCast(ptr));
+    cmsis_dap.destroy();
 }
 
 fn attach(ptr: *anyopaque, speed: Probe.ProtocolSpeed) Probe.AttachError!void {

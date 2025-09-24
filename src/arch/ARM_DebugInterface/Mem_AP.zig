@@ -7,6 +7,7 @@ const Memory = @import("../../Memory.zig");
 
 const Mem_AP = @This();
 
+allocator: std.mem.Allocator,
 adi: *ARM_DebugInterface,
 address: AP_Address,
 support_other_sizes: bool,
@@ -24,7 +25,7 @@ fn max_transfer_size(address: u64) usize {
     return (a + 1) * TAR_MAX_INCREMENT - address;
 }
 
-pub fn init(adi: *ARM_DebugInterface, ap_address: AP_Address) !Mem_AP {
+pub fn init(allocator: std.mem.Allocator, adi: *ARM_DebugInterface, ap_address: AP_Address) !Mem_AP {
     const idr = try adi.ap_reg_read(ap_address, ARM_DebugInterface.regs.ap.IDR.addr);
     if (idr == 0) return error.NoAP_Found;
 
@@ -49,6 +50,7 @@ pub fn init(adi: *ARM_DebugInterface, ap_address: AP_Address) !Mem_AP {
     try regs.CSW.write(adi, ap_address, csw);
 
     return .{
+        .allocator = allocator,
         .adi = adi,
         .address = ap_address,
         .support_other_sizes = support_other_sizes,
@@ -69,6 +71,9 @@ pub fn memory(mem_ap: *Mem_AP) Memory {
             .write_u16 = write_u16,
             .write_u32 = write_u32,
             // .write_u64 = write_u64,
+
+            .read = read,
+            .write = write,
         },
     };
 }
@@ -279,6 +284,49 @@ fn write_u32(ptr: *anyopaque, addr: u64, data: []const u32) Memory.WriteError!vo
 //     mem_ap.set_access_size(.double_word) catch return error.WriteFailed;
 //     mem_ap.adi.ap_reg_write_repeated(mem_ap.address, regs.DRW.addr, data) catch return error.WriteFailed;
 // }
+
+pub fn read(ptr: *anyopaque, addr: u64, data: []u8) Memory.ReadError!void {
+    _ = ptr; // autofix
+    _ = addr; // autofix
+    _ = data; // autofix
+    @panic("TODO");
+}
+
+pub fn write(ptr: *anyopaque, addr: u64, data: []const u8) Memory.WriteError!void {
+    const mem_ap: *Mem_AP = @alignCast(@ptrCast(ptr));
+
+    const bytes_before_start = std.mem.alignForward(u64, addr, 4) - addr;
+    const bytes_until_end = addr + data.len - std.mem.alignBackward(u64, addr + data.len, 4);
+
+    // if we have at least x aligned words (we should benchmark this)
+    if (bytes_before_start + bytes_until_end + @sizeOf(u32) < data.len) {
+        if (bytes_before_start > 0) {
+            try write_u8(ptr, addr, data[0..bytes_before_start]);
+        }
+
+        const aligned_data_len = data.len - bytes_before_start - bytes_until_end;
+        {
+            const u32_data: []u32 = mem_ap.allocator.alloc(u32, aligned_data_len / @sizeOf(u32)) catch return error.WriteFailed;
+            defer mem_ap.allocator.free(u32_data);
+
+            for (u32_data, 0..) |*word, i| {
+                word.* = std.mem.readInt(u32, data[bytes_before_start + i * @sizeOf(u32) ..][0..4], .little);
+            }
+
+            try write_u32(ptr, addr + bytes_before_start, u32_data);
+        }
+
+        if (bytes_until_end > 0) {
+            try write_u8(
+                ptr,
+                addr + bytes_before_start + aligned_data_len,
+                data[data.len - bytes_until_end ..],
+            );
+        }
+    } else {
+        try write_u8(ptr, addr, data);
+    }
+}
 
 pub const AccessSize = enum(u3) {
     byte = 0b000,

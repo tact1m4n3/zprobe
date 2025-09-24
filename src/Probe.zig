@@ -8,50 +8,39 @@ pub const CMSIS_DAP = @import("Probe/CMSIS_DAP.zig");
 
 const Probe = @This();
 
-pub const Any = union(enum) {
-    cmsis_dap: CMSIS_DAP,
-
-    pub fn init(allocator: std.mem.Allocator, filter: libusb.DeviceIterator.Filter) !Any {
-        var device_it: libusb.DeviceIterator = try .init(filter);
-        defer device_it.deinit();
-
-        while (try device_it.next()) |device| {
-            is_cmsis_dap: {
-                const cmsis_dap = CMSIS_DAP.init_with_device(allocator, device) catch |err| switch (err) {
-                    error.InvalidDevice => break :is_cmsis_dap,
-                    else => return err,
-                };
-                return .{ .cmsis_dap = cmsis_dap };
-            }
-
-            // TODO: add support for other probes
-        } else return error.NoProbeFound;
-    }
-
-    pub fn deinit(self: Any, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .cmsis_dap => |cmsis_dap| cmsis_dap.deinit(allocator),
-        }
-    }
-
-    pub fn probe(self: *Any) Probe {
-        return switch (self.*) {
-            .cmsis_dap => |*cmsis_dap| cmsis_dap.probe(),
-        };
-    }
-};
-
 ptr: *anyopaque,
 vtable: *const Vtable,
 
 pub const AttachError = error{AttachFailed};
 
 pub const Vtable = struct {
+    destroy: *const fn (ptr: *anyopaque) void,
     attach: *const fn (ptr: *anyopaque, speed: ProtocolSpeed) AttachError!void,
     detach: *const fn (ptr: *anyopaque) void,
     arm_debug_interface: *const fn (ptr: *anyopaque) ?*ARM_DebugInterface = default_arm_debug_interface,
     // TODO: support riscv
 };
+
+pub fn create(allocator: std.mem.Allocator, filter: libusb.DeviceIterator.Filter) !Probe {
+    var device_it: libusb.DeviceIterator = try .init(filter);
+    defer device_it.deinit();
+
+    while (try device_it.next()) |device| {
+        is_cmsis_dap: {
+            const cmsis_dap = CMSIS_DAP.create_with_device(allocator, device) catch |err| switch (err) {
+                error.InvalidDevice => break :is_cmsis_dap,
+                else => return err,
+            };
+            return cmsis_dap.probe();
+        }
+
+        // TODO: add support for other probes
+    } else return error.NoProbeFound;
+}
+
+pub fn destroy(probe: Probe) void {
+    probe.vtable.destroy(probe.ptr);
+}
 
 pub fn attach(probe: Probe, speed: ProtocolSpeed) !void {
     try probe.vtable.attach(probe.ptr, speed);
