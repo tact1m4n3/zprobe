@@ -3,7 +3,9 @@ const std = @import("std");
 const ARM_DebugInterface = @This();
 
 const Timeout = @import("../Timeout.zig");
+
 pub const Mem_AP = @import("ARM_DebugInterface/Mem_AP.zig");
+pub const Cortex_M = @import("ARM_DebugInterface/Cortex_M.zig");
 
 allocator: std.mem.Allocator,
 
@@ -11,7 +13,10 @@ vtable: *const Vtable,
 active_protocol: Protocol,
 
 active_dp_state: ?DP_State = null,
+// TODO: maybe don't use auto containers since DP_Address is a number
 other_dp_states: std.AutoHashMapUnmanaged(DP_Address, DP_State) = .empty,
+
+ap_states: std.AutoArrayHashMapUnmanaged(AP_Address, AP_State) = .empty,
 
 pub const Error = error{
     CommandFailed,
@@ -28,11 +33,27 @@ pub const Vtable = struct {
 
 pub fn deinit(adi: *ARM_DebugInterface) void {
     adi.other_dp_states.deinit(adi.allocator);
+    adi.ap_states.deinit(adi.allocator);
 }
 
-pub fn state_reset(adi: *ARM_DebugInterface) void {
+pub fn reinit(adi: *ARM_DebugInterface) !void {
     adi.active_dp_state = null;
+
+    // Clear DP states because we may have to run the setup again.
     adi.other_dp_states.clearAndFree(adi.allocator);
+
+    // Try to reinit all APs.
+    for (adi.ap_states.values()) |*ap| {
+        try ap.reinit();
+    }
+}
+
+pub fn get_memory_ap(adi: *ARM_DebugInterface, ap_address: AP_Address) !*Mem_AP {
+    const gop = try adi.ap_states.getOrPut(adi.allocator, ap_address);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{ .mem_ap = try Mem_AP.init(adi.allocator, adi, ap_address) };
+    }
+    return &gop.value_ptr.mem_ap;
 }
 
 pub fn dp_reg_read(
@@ -506,6 +527,16 @@ pub const DP_State = struct {
             select1: regs.dp.SELECT1.Type,
         },
     };
+};
+
+pub const AP_State = union(enum) {
+    mem_ap: Mem_AP,
+
+    pub fn reinit(ap_state: *AP_State) !void {
+        switch (ap_state.*) {
+            .mem_ap => |*mem_ap| try mem_ap.reinit(),
+        }
+    }
 };
 
 pub const Protocol = enum {

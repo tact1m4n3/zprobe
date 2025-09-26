@@ -60,9 +60,13 @@ pub fn create_with_device(
 }
 
 pub fn destroy(cmsis_dap: *CMSIS_DAP) void {
-    cmsis_dap.adi.allocator.free(cmsis_dap.buf);
+    const allocator = cmsis_dap.adi.allocator;
+
+    cmsis_dap.adi.deinit();
     cmsis_dap.dev.deinit();
-    cmsis_dap.adi.allocator.destroy(cmsis_dap);
+
+    allocator.free(cmsis_dap.buf);
+    allocator.destroy(cmsis_dap);
 }
 
 pub fn probe(cmsis_dap: *CMSIS_DAP) Probe {
@@ -111,7 +115,6 @@ fn attach(ptr: *anyopaque, speed: Probe.ProtocolSpeed) Probe.AttachError!void {
 fn detach(ptr: *anyopaque) void {
     const cmsis_dap: *CMSIS_DAP = @ptrCast(@alignCast(ptr));
 
-    cmsis_dap.adi.state_reset();
     cmsis_dap.disconnect() catch |err| {
         std.log.err("failed to disconnect from probe: {t}", .{err});
     };

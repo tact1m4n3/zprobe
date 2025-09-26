@@ -2,23 +2,9 @@ const std = @import("std");
 
 const libusb = @import("libusb.zig");
 const Probe = @import("Probe.zig");
+const Target = @import("Target.zig");
 const arch = @import("arch.zig");
-const cpu = @import("cpu.zig");
-const ARM_DebugInterface = @import("arch/ARM_DebugInterface.zig");
 const chip = @import("chip.zig");
-
-const DP_CORE0: ARM_DebugInterface.DP_Address = .{ .multidrop = 0x01002927 };
-const AP_CORE0: ARM_DebugInterface.AP_Address = .{
-    .dp = DP_CORE0,
-    .address = .{ .v1 = 0 },
-};
-
-const DP_CORE1: ARM_DebugInterface.DP_Address = .{ .multidrop = 0x11002927 };
-const AP_CORE1: ARM_DebugInterface.AP_Address = .{
-    .dp = DP_CORE1,
-    .address = .{ .v1 = 0 },
-};
-const RESCUE_DP: ARM_DebugInterface.DP_Address = .{ .multidrop = 0xf1002927 };
 
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
@@ -41,10 +27,12 @@ pub fn main() !void {
     try probe.attach(.mhz(1));
     defer probe.detach();
 
-    var rp2040: chip.RP2040 = try .init(allocator, probe);
+    var rp2040: chip.RP2040 = try .init(probe);
     defer rp2040.deinit();
 
-    try rp2040.system_reset();
+    const memory = rp2040.target.memory();
+
+    try rp2040.target.system_reset();
 
     const elf_path = args[1];
     {
@@ -64,10 +52,10 @@ pub fn main() !void {
             const data = try elf_file_reader.interface.readAlloc(allocator, ph.p_filesz);
             defer allocator.free(data);
 
-            try rp2040.core0.memory.write(ph.p_paddr, data);
+            try memory.write(ph.p_paddr, data);
         }
 
-        try rp2040.core0.write_cpu_register(.debug_return_address, @truncate(header.entry));
-        try rp2040.core0.run();
+        try rp2040.target.write_core_register(.boot, .{ .special = .ip }, @truncate(header.entry));
+        try rp2040.target.run(.boot);
     }
 }
