@@ -1,0 +1,15 @@
+.{
+    .name = .zprobe,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.15.1",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src/main.zig",
+    },
+    .dependencies = .{
+        .libusb = .{ .path = "vendor/libusb" },
+        .microzig = .{ .path = "../microzig" }, // TODO: url
+    },
+    .fingerprint = 0xa0717333ace084a,
+}
