@@ -104,7 +104,7 @@ pub const WithStub = struct {
             image_header.program_sector_size,
         ) - mem_buf_addr;
 
-        try target.write(load_region.offset, flash_stub);
+        try target.write_memory(load_region.offset, flash_stub);
 
         return .{
             .target = target,
@@ -146,7 +146,7 @@ pub const WithStub = struct {
                 flasher.mem_buf_length,
             );
 
-            try flasher.target.write(flasher.mem_buf_addr, data[offset..][0..count]);
+            try flasher.target.write_memory(flasher.mem_buf_addr, data[offset..][0..count]);
 
             try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
             try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.mem_buf_addr);
@@ -272,8 +272,6 @@ pub fn elf(
 
 // TODO: relocate this
 pub fn run_ram_image(allocator: std.mem.Allocator, target: *Target, elf_reader: *std.fs.File.Reader) !void {
-    const memory = target.memory();
-
     const header = try std.elf.Header.read(&elf_reader.interface);
 
     var ph_iterator = header.iterateProgramHeaders(elf_reader);
@@ -287,10 +285,10 @@ pub fn run_ram_image(allocator: std.mem.Allocator, target: *Target, elf_reader: 
         const kind = try find_memory_region_kind(target.memory_map, ph.p_paddr, ph.p_memsz);
         if (kind != .ram) return error.SectionNotInRam;
 
-        try memory.write(ph.p_paddr, data);
+        try target.write_memory(ph.p_paddr, data);
     }
 
-    try target.write_core_register(.boot, .{ .special = .ip }, @truncate(header.entry));
+    try target.write_register(.boot, .{ .special = .ip }, @truncate(header.entry));
     try target.run(.boot);
 }
 

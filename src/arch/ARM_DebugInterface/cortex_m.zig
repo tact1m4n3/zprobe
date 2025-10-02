@@ -258,7 +258,7 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
             inline for (cpus) |cpu| {
                 if (cpu.id == core_id) {
                     const CPU_Impl = Impl(@FieldType(Parent, cpu.memory_name));
-                    return CPU_Impl.is_halted(&@field(parent, cpu.memory_name)) catch return error.CommandFailed;
+                    return CPU_Impl.is_halted(&@field(parent, cpu.memory_name)) catch error.CommandFailed;
                 }
             } else return error.InvalidCore;
         }
@@ -269,7 +269,7 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
             inline for (cpus) |cpu| {
                 if (core_mask.is_selected(cpu.id)) {
                     const CPU_Impl = Impl(@FieldType(Parent, cpu.memory_name));
-                    return CPU_Impl.halt(&@field(parent, cpu.memory_name)) catch return error.CommandFailed;
+                    return CPU_Impl.halt(&@field(parent, cpu.memory_name)) catch error.CommandFailed;
                 }
             }
         }
@@ -280,7 +280,7 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
             inline for (cpus) |cpu| {
                 if (core_mask.is_selected(cpu.id)) {
                     const CPU_Impl = Impl(@FieldType(Parent, cpu.memory_name));
-                    return CPU_Impl.run(&@field(parent, cpu.memory_name)) catch return error.CommandFailed;
+                    return CPU_Impl.run(&@field(parent, cpu.memory_name)) catch error.CommandFailed;
                 }
             }
         }
@@ -291,7 +291,7 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
             inline for (cpus) |cpu| {
                 if (core_mask.is_selected(cpu.id)) {
                     const CPU_Impl = Impl(@FieldType(Parent, cpu.memory_name));
-                    return CPU_Impl.reset(&@field(parent, cpu.memory_name)) catch return error.CommandFailed;
+                    return CPU_Impl.reset(&@field(parent, cpu.memory_name)) catch error.CommandFailed;
                 }
             }
         }
@@ -302,7 +302,7 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
             inline for (cpus) |cpu| {
                 if (core_mask.is_selected(cpu.id)) {
                     const CPU_Impl = Impl(@FieldType(Parent, cpu.memory_name));
-                    return CPU_Impl.halt_reset(&@field(parent, cpu.memory_name)) catch return error.CommandFailed;
+                    return CPU_Impl.halt_reset(&@field(parent, cpu.memory_name)) catch error.CommandFailed;
                 }
             }
         }
@@ -313,7 +313,7 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
             inline for (cpus) |cpu| {
                 if (cpu.id == core_id) {
                     const CPU_Impl = Impl(@FieldType(Parent, cpu.memory_name));
-                    return CPU_Impl.read_register(&@field(parent, cpu.memory_name), try get_cm_reg(reg)) catch return error.ReadFailed;
+                    return CPU_Impl.read_register(&@field(parent, cpu.memory_name), try get_cm_reg(reg)) catch error.ReadFailed;
                 }
             } else return error.InvalidCore;
         }
@@ -326,7 +326,7 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
                     if (value > std.math.maxInt(u32)) return error.RegisterOnly32Bit;
 
                     const CPU_Impl = Impl(@FieldType(Parent, cpu.memory_name));
-                    CPU_Impl.write_register(&@field(parent, cpu.memory_name), try get_cm_reg(reg), @truncate(value)) catch return error.WriteFailed;
+                    return CPU_Impl.write_register(&@field(parent, cpu.memory_name), try get_cm_reg(reg), @truncate(value)) catch error.WriteFailed;
                 }
             } else return error.InvalidCore;
         }

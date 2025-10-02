@@ -45,5 +45,12 @@ pub fn main() !void {
         try flash.elf(allocator, flasher, rp2040.target.memory_map, &elf_file_reader);
     }
 
-    try rp2040.target.reset(.boot);
+    try rp2040.target.reset(.all);
+
+    while (true) {
+        std.Thread.sleep(1 * std.time.ns_per_s);
+        try rp2040.target.halt(.boot);
+        std.log.debug("ip: {x}", .{try rp2040.target.read_register(.boot, .{ .special = .ip })});
+        try rp2040.target.run(.boot);
+    }
 }

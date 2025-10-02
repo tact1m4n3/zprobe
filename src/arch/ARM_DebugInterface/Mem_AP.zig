@@ -91,6 +91,7 @@ pub fn read_u32(mem_ap: *Mem_AP, addr: u64) !u32 {
     if (addr & 0x3 != 0) return error.AddressMisaligned;
 
     try mem_ap.set_access_size(.word);
+    try mem_ap.set_tar_address(addr);
     return try mem_ap.adi.ap_reg_read(mem_ap.address, regs.DRW.addr);
 }
 
@@ -98,6 +99,7 @@ pub fn write_u32(mem_ap: *Mem_AP, addr: u64, value: u32) !void {
     if (addr & 0x3 != 0) return error.AddressMisaligned;
 
     try mem_ap.set_access_size(.word);
+    try mem_ap.set_tar_address(addr);
     try mem_ap.adi.ap_reg_write(mem_ap.address, regs.DRW.addr, value);
 }
 
@@ -141,6 +143,8 @@ pub fn write(mem_ap: *Mem_AP, addr: u64, data: []const u8) !void {
         {
             const aligned_data_words = aligned_data_len / @sizeOf(u32);
 
+            try mem_ap.set_access_size(.word);
+
             var offset: u64 = 0;
             while (offset < aligned_data_words) {
                 const base_addr = addr + bytes_before_start + offset * @sizeOf(u32);
@@ -148,10 +152,10 @@ pub fn write(mem_ap: *Mem_AP, addr: u64, data: []const u8) !void {
 
                 try mem_ap.set_tar_address(base_addr);
 
-                const count = @min(data.len - offset, max_count);
+                const count = @min(aligned_data_words - offset, max_count);
 
-                for (mem_ap.tmp_buf[0..count], 0..count) |*word, i| {
-                    word.* = std.mem.readInt(u32, data[bytes_before_start + offset + i * @sizeOf(u32) ..][0..4], .little);
+                for (mem_ap.tmp_buf[0..count], 0..) |*word, i| {
+                    word.* = std.mem.readInt(u32, data[bytes_before_start + (offset + i) * @sizeOf(u32) ..][0..4], .little);
                 }
 
                 try mem_ap.adi.ap_reg_write_repeated(mem_ap.address, regs.DRW.addr, mem_ap.tmp_buf[0..count]);

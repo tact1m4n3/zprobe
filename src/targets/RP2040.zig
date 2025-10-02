@@ -5,7 +5,7 @@ const ADI = @import("../arch/ARM_DebugInterface.zig");
 const Memory = @import("../Memory.zig");
 const Target = @import("../Target.zig");
 const cortex_m = ADI.cortex_m;
-const cortex_m_mem_ap = cortex_m.Impl(ADI.Mem_AP);
+const cortex_m_impl = cortex_m.Impl(ADI.Mem_AP);
 
 const RP2040 = @This();
 
@@ -53,11 +53,11 @@ pub fn init(probe: Probe) !RP2040 {
     var core0_ap: ADI.Mem_AP = try .init(adi, AP_CORE0);
     var core1_ap: ADI.Mem_AP = try .init(adi, AP_CORE1);
 
-    try cortex_m_mem_ap.init(&core0_ap);
-    errdefer cortex_m_mem_ap.deinit(&core0_ap);
+    try cortex_m_impl.init(&core0_ap);
+    errdefer cortex_m_impl.deinit(&core0_ap);
 
-    try cortex_m_mem_ap.init(&core1_ap);
-    errdefer cortex_m_mem_ap.deinit(&core1_ap);
+    try cortex_m_impl.init(&core1_ap);
+    errdefer cortex_m_impl.deinit(&core1_ap);
 
     return .{
         .adi = adi,
@@ -68,8 +68,8 @@ pub fn init(probe: Probe) !RP2040 {
 }
 
 pub fn deinit(rp2040: *RP2040) void {
-    cortex_m_mem_ap.deinit(&rp2040.core0_ap);
-    cortex_m_mem_ap.deinit(&rp2040.core1_ap);
+    cortex_m_impl.deinit(&rp2040.core0_ap);
+    cortex_m_impl.deinit(&rp2040.core1_ap);
 }
 
 fn do_system_reset(rp2040: *RP2040) !void {
@@ -82,18 +82,15 @@ fn do_system_reset(rp2040: *RP2040) !void {
     try rp2040.core0_ap.reinit();
     try rp2040.core1_ap.reinit();
 
-    try cortex_m_mem_ap.init(&rp2040.core0_ap);
-    try cortex_m_mem_ap.init(&rp2040.core1_ap);
+    // enter debug mode
+    try cortex_m_impl.init(&rp2040.core0_ap);
+    try cortex_m_impl.init(&rp2040.core1_ap);
 
-    try cortex_m_mem_ap.halt_reset(&rp2040.core0_ap);
+    // take the core out of rescue mode
+    try rp2040.target.halt_reset(.boot);
 }
 
 fn system_reset(target: *Target) Target.CommandError!void {
     const rp2040: *RP2040 = @fieldParentPtr("target", target);
     do_system_reset(rp2040) catch return error.CommandFailed;
-}
-
-fn memory(target: *Target) Memory {
-    const rp2040: *RP2040 = @fieldParentPtr("target", target);
-    return rp2040.core0_ap.memory();
 }
