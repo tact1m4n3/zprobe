@@ -9,8 +9,8 @@ const cortex_m_impl = cortex_m.Impl(ADI.Mem_AP);
 
 const RP2040 = @This();
 
-const CORE0_ID: Target.Core_ID = .boot;
-const CORE1_ID: Target.Core_ID = .num(1);
+const CORE0_ID: Target.CoreId = .boot;
+const CORE1_ID: Target.CoreId = .num(1);
 
 const DP_CORE0: ADI.DP_Address = .{ .multidrop = 0x01002927 };
 pub const AP_CORE0: ADI.AP_Address = .{
@@ -32,7 +32,7 @@ target: Target,
 
 const target_def: Target = .{
     .name = "RP2040",
-    .core_ids = &.{ CORE0_ID, CORE1_ID },
+    .valid_cores = .with_ids(&.{ CORE0_ID, CORE1_ID }),
     .memory_map = &.{
         .{ .offset = 0x10000000, .length = 2048 * 1024, .kind = .flash },
         .{ .offset = 0x20000000, .length = 256 * 1024, .kind = .ram },
@@ -50,14 +50,8 @@ const target_def: Target = .{
 pub fn init(probe: Probe) !RP2040 {
     const adi = probe.arm_debug_interface() orelse return error.ADI_NotSupported;
 
-    var core0_ap: ADI.Mem_AP = try .init(adi, AP_CORE0);
-    var core1_ap: ADI.Mem_AP = try .init(adi, AP_CORE1);
-
-    try cortex_m_impl.init(&core0_ap);
-    errdefer cortex_m_impl.deinit(&core0_ap);
-
-    try cortex_m_impl.init(&core1_ap);
-    errdefer cortex_m_impl.deinit(&core1_ap);
+    const core0_ap: ADI.Mem_AP = try .init(adi, AP_CORE0);
+    const core1_ap: ADI.Mem_AP = try .init(adi, AP_CORE1);
 
     return .{
         .adi = adi,
@@ -68,8 +62,7 @@ pub fn init(probe: Probe) !RP2040 {
 }
 
 pub fn deinit(rp2040: *RP2040) void {
-    cortex_m_impl.deinit(&rp2040.core0_ap);
-    cortex_m_impl.deinit(&rp2040.core1_ap);
+    rp2040.target.deinit();
 }
 
 fn do_system_reset(rp2040: *RP2040) !void {
@@ -82,9 +75,8 @@ fn do_system_reset(rp2040: *RP2040) !void {
     try rp2040.core0_ap.reinit();
     try rp2040.core1_ap.reinit();
 
-    // enter debug mode
-    try cortex_m_impl.init(&rp2040.core0_ap);
-    try cortex_m_impl.init(&rp2040.core1_ap);
+    rp2040.target.attached_cores = .empty;
+    rp2040.target.halted_cores = .empty;
 
     // take the core out of rescue mode
     try rp2040.target.halt_reset(.boot);

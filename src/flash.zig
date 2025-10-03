@@ -104,6 +104,7 @@ pub const WithStub = struct {
             image_header.program_sector_size,
         ) - mem_buf_addr;
 
+        try target.halt(.all);
         try target.write_memory(load_region.offset, flash_stub);
 
         return .{

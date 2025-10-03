@@ -4,29 +4,26 @@ const Timeout = @import("../../Timeout.zig");
 const Target = @import("../../Target.zig");
 const Mem_AP = @import("../../arch/ARM_DebugInterface/Mem_AP.zig");
 
-pub const AIRCR_VECTKEY = 0x05FA;
-pub const DHCSR_DEBUGKEY = 0xA05F;
-
 pub fn Impl(Memory: type) type {
     return struct {
-        pub fn init(memory: *Memory) !void {
+        pub fn attach(memory: *Memory, should_halt: bool) !void {
             try regs.armv6m.DHCSR_0_15.write(memory, .{
                 .C_DEBUGEN = 1,
                 .C_MASKINTS = 0,
-                .C_HALT = 0,
+                .C_HALT = @intFromBool(should_halt),
                 .C_STEP = 0,
                 .DBGKEY = DHCSR_DEBUGKEY,
             });
         }
 
-        pub fn deinit(memory: *Memory) void {
-            regs.armv6m.DHCSR_0_15.write(memory, .{
+        pub fn detach(memory: *Memory) !void {
+            try regs.armv6m.DHCSR_0_15.write(memory, .{
                 .C_DEBUGEN = 0,
                 .C_MASKINTS = 0,
                 .C_HALT = 0,
                 .C_STEP = 0,
                 .DBGKEY = DHCSR_DEBUGKEY,
-            }) catch {};
+            });
         }
 
         pub fn is_halted(memory: *Memory) !bool {
@@ -88,7 +85,7 @@ pub fn Impl(Memory: type) type {
             }
         }
 
-        pub fn read_register(memory: *Memory, reg: Register_ID) !u32 {
+        pub fn read_register(memory: *Memory, reg: RegisterId) !u32 {
             try regs.armv6m.DCRSR.write(memory, .{
                 .REGSEL = reg,
                 .REGWnR = .read,
@@ -102,7 +99,7 @@ pub fn Impl(Memory: type) type {
             return try regs.armv6m.DCRDR.raw_read(memory);
         }
 
-        pub fn write_register(memory: *Memory, reg: Register_ID, value: u32) !void {
+        pub fn write_register(memory: *Memory, reg: RegisterId, value: u32) !void {
             try regs.armv6m.DCRDR.raw_write(memory, value);
 
             try regs.armv6m.DCRSR.write(memory, .{
@@ -118,7 +115,7 @@ pub fn Impl(Memory: type) type {
     };
 }
 
-pub const Register_ID = enum(u5) {
+pub const RegisterId = enum(u5) {
     r0 = 0,
     r1,
     r2,
@@ -140,6 +137,9 @@ pub const Register_ID = enum(u5) {
     psp,
     primask_control = 0b10100,
 };
+
+pub const AIRCR_VECTKEY = 0x05FA;
+pub const DHCSR_DEBUGKEY = 0xA05F;
 
 pub const regs = struct {
     pub const armv6m = struct {
@@ -178,7 +178,7 @@ pub const regs = struct {
         });
 
         pub const DCRSR = Register(0xE000EDF4, packed struct(u32) {
-            REGSEL: Register_ID,
+            REGSEL: RegisterId,
             reserved0: u11 = 0,
             REGWnR: enum(u1) {
                 read = 0,
@@ -234,7 +234,7 @@ pub fn Register(reg_addr: u32, comptime T: type) type {
 }
 
 pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: []const struct {
-    id: Target.Core_ID,
+    id: Target.CoreId,
     memory_name: []const u8,
 }) type {
     return struct {
@@ -242,6 +242,8 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
 
         pub fn core_access_vtable() Target.CoreAccessVtable {
             return .{
+                .attach = target_attach,
+                .detach = target_detach,
                 .is_halted = target_is_halted,
                 .halt = target_halt,
                 .run = target_run,
@@ -252,7 +254,29 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
             };
         }
 
-        pub fn target_is_halted(target: *Target, core_id: Target.Core_ID) Target.CommandError!bool {
+        pub fn target_attach(target: *Target, core_id: Target.CoreId) Target.CommandError!void {
+            const parent: *Parent = @fieldParentPtr(target_name, target);
+
+            inline for (cpus) |cpu| {
+                if (cpu.id == core_id) {
+                    const CPU_Impl = Impl(@FieldType(Parent, cpu.memory_name));
+                    return CPU_Impl.attach(&@field(parent, cpu.memory_name), target.halted_cores.is_selected(core_id)) catch error.CommandFailed;
+                }
+            } else return error.InvalidCore;
+        }
+
+        pub fn target_detach(target: *Target, core_id: Target.CoreId) Target.CommandError!void {
+            const parent: *Parent = @fieldParentPtr(target_name, target);
+
+            inline for (cpus) |cpu| {
+                if (cpu.id == core_id) {
+                    const CPU_Impl = Impl(@FieldType(Parent, cpu.memory_name));
+                    return CPU_Impl.detach(&@field(parent, cpu.memory_name)) catch error.CommandFailed;
+                }
+            } else return error.InvalidCore;
+        }
+
+        pub fn target_is_halted(target: *Target, core_id: Target.CoreId) Target.CommandError!bool {
             const parent: *Parent = @fieldParentPtr(target_name, target);
 
             inline for (cpus) |cpu| {
@@ -307,7 +331,7 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
             }
         }
 
-        pub fn target_read_register(target: *Target, core_id: Target.Core_ID, reg: Target.Register_ID) Target.RegisterReadError!u64 {
+        pub fn target_read_register(target: *Target, core_id: Target.CoreId, reg: Target.RegisterId) Target.RegisterReadError!u64 {
             const parent: *Parent = @fieldParentPtr(target_name, target);
 
             inline for (cpus) |cpu| {
@@ -318,7 +342,7 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
             } else return error.InvalidCore;
         }
 
-        pub fn target_write_register(target: *Target, core_id: Target.Core_ID, reg: Target.Register_ID, value: u64) Target.RegisterWriteError!void {
+        pub fn target_write_register(target: *Target, core_id: Target.CoreId, reg: Target.RegisterId, value: u64) Target.RegisterWriteError!void {
             const parent: *Parent = @fieldParentPtr(target_name, target);
 
             inline for (cpus) |cpu| {
@@ -333,7 +357,7 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
     };
 }
 
-fn get_cm_reg(target_reg: Target.Register_ID) error{InvalidRegister}!Register_ID {
+fn get_cm_reg(target_reg: Target.RegisterId) error{InvalidRegister}!RegisterId {
     return switch (target_reg) {
         .special => |special| switch (special) {
             .ip => .debug_return_address,
