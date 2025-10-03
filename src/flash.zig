@@ -74,7 +74,6 @@ pub const WithStub = struct {
         program_fn_offset: u32,
     };
 
-    target: *Target,
     image_header: ImageHeader,
     erase_sector_size: u32,
     program_sector_size: u32,
@@ -108,7 +107,6 @@ pub const WithStub = struct {
         try target.write_memory(load_region.offset, flash_stub);
 
         return .{
-            .target = target,
             .image_header = image_header,
             .erase_sector_size = image_header.erase_sector_size,
             .program_sector_size = image_header.program_sector_size,
@@ -120,22 +118,22 @@ pub const WithStub = struct {
 
     /// Address must be aligned to erase_sector_size and length must be a
     /// multiple of erase_sector_size
-    pub fn erase(flasher: WithStub, addr: u32, length: u32) !void {
+    pub fn erase(flasher: WithStub, target: *Target, addr: u32, length: u32) !void {
         std.debug.assert(std.mem.isAligned(addr, flasher.erase_sector_size));
         std.debug.assert(std.mem.isAligned(length, flasher.erase_sector_size));
 
-        try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
-        try flasher.target.write_register(.boot, .{ .arg = 1 }, length);
-        try flasher.target.write_register(.boot, .{ .special = .ip }, flasher.image_base + flasher.image_header.erase_fn_offset);
-        try flasher.target.write_register(.boot, .{ .special = .sp }, flasher.image_base + flasher.image_header.stack_pointer_offset);
-        try flasher.target.run(.boot);
+        try target.write_register(.boot, .{ .arg = 0 }, addr);
+        try target.write_register(.boot, .{ .arg = 1 }, length);
+        try target.write_register(.boot, .{ .special = .ip }, flasher.image_base + flasher.image_header.erase_fn_offset);
+        try target.write_register(.boot, .{ .special = .sp }, flasher.image_base + flasher.image_header.stack_pointer_offset);
+        try target.run(.boot);
 
-        try flasher.wait_for_function();
+        try wait_for_function(target);
     }
 
     /// Address must be aligned to program_sector_size and length must be a
     /// multiple of progam_sector_size
-    pub fn program(flasher: WithStub, addr: u32, data: []const u8) !void {
+    pub fn program(flasher: WithStub, target: *Target, addr: u32, data: []const u8) !void {
         std.debug.assert(std.mem.isAligned(addr, flasher.program_sector_size));
         std.debug.assert(std.mem.isAligned(data.len, flasher.program_sector_size));
 
@@ -147,27 +145,27 @@ pub const WithStub = struct {
                 flasher.mem_buf_length,
             );
 
-            try flasher.target.write_memory(flasher.mem_buf_addr, data[offset..][0..count]);
+            try target.write_memory(flasher.mem_buf_addr, data[offset..][0..count]);
 
-            try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
-            try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.mem_buf_addr);
-            try flasher.target.write_register(.boot, .{ .arg = 2 }, count);
-            try flasher.target.write_register(.boot, .{ .special = .ip }, flasher.image_base + flasher.image_header.program_fn_offset);
-            try flasher.target.write_register(.boot, .{ .special = .sp }, flasher.image_base + flasher.image_header.stack_pointer_offset);
-            try flasher.target.run(.boot);
+            try target.write_register(.boot, .{ .arg = 0 }, addr);
+            try target.write_register(.boot, .{ .arg = 1 }, flasher.mem_buf_addr);
+            try target.write_register(.boot, .{ .arg = 2 }, count);
+            try target.write_register(.boot, .{ .special = .ip }, flasher.image_base + flasher.image_header.program_fn_offset);
+            try target.write_register(.boot, .{ .special = .sp }, flasher.image_base + flasher.image_header.stack_pointer_offset);
+            try target.run(.boot);
 
-            try flasher.wait_for_function();
+            try wait_for_function(target);
 
             offset += count;
         }
     }
 
-    fn wait_for_function(flasher: WithStub) !void {
+    fn wait_for_function(target: *Target) !void {
         var timeout: Timeout = try .init(.{
             .after = 5 * std.time.ns_per_s,
             .sleep_per_tick_ns = 100 * std.time.ns_per_ms,
         });
-        while (!try flasher.target.is_halted(.boot)) {
+        while (!try target.is_halted(.boot)) {
             try timeout.tick();
         }
     }
@@ -175,8 +173,7 @@ pub const WithStub = struct {
 
 pub fn elf(
     allocator: std.mem.Allocator,
-    flasher: anytype,
-    memory_map: []const Target.MemoryRegion,
+    target: *Target,
     elf_reader: *std.fs.File.Reader,
 ) !void {
     const header = try std.elf.Header.read(&elf_reader.interface);
@@ -199,7 +196,7 @@ pub fn elf(
         if (ph.p_type != std.elf.PT_LOAD) continue;
         if (ph.p_filesz == 0) continue;
 
-        const kind = try find_memory_region_kind(memory_map, ph.p_paddr, ph.p_filesz);
+        const kind = try find_memory_region_kind(target.memory_map, ph.p_paddr, ph.p_filesz);
         if (kind != .flash) continue;
 
         try segments.append(allocator, .{
@@ -210,6 +207,8 @@ pub fn elf(
     }
 
     std.mem.sort(Segment, segments.items, {}, Segment.is_less);
+
+    const flasher: WithStub = try .init(target);
 
     var data: std.Io.Writer.Allocating = .init(allocator);
     defer data.deinit();
@@ -234,13 +233,13 @@ pub fn elf(
         if (seg.addr - last_segment_end > flasher.program_sector_size) {
             if (current_erase_start < last_segment_end) {
                 const padded_erase_len = std.mem.alignForward(u32, @intCast(data.written().len), flasher.erase_sector_size);
-                try flasher.erase(current_erase_start, padded_erase_len);
+                try flasher.erase(target, current_erase_start, padded_erase_len);
             }
 
             const padded_data_len = std.mem.alignForward(u32, @intCast(data.written().len), flasher.program_sector_size);
             try data.ensureTotalCapacity(padded_data_len);
             data.writer.end = padded_data_len;
-            try flasher.program(current_program_start, data.written());
+            try flasher.program(target, current_program_start, data.written());
 
             current_erase_start = std.mem.alignBackward(u32, seg.addr, flasher.erase_sector_size);
             current_program_start = std.mem.alignBackward(u32, seg.addr, flasher.program_sector_size);
@@ -262,13 +261,13 @@ pub fn elf(
 
     if (current_erase_start < last_segment_end) {
         const padded_erase_len = std.mem.alignForward(u32, @intCast(data.written().len), flasher.erase_sector_size);
-        try flasher.erase(current_erase_start, padded_erase_len);
+        try flasher.erase(target, current_erase_start, padded_erase_len);
     }
 
     const padded_data_len = std.mem.alignForward(u32, @intCast(data.written().len), flasher.program_sector_size);
     try data.ensureTotalCapacity(padded_data_len);
     data.writer.end = padded_data_len;
-    try flasher.program(current_program_start, data.written());
+    try flasher.program(target, current_program_start, data.written());
 }
 
 // TODO: relocate this
