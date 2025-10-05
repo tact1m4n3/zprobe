@@ -233,12 +233,14 @@ pub const CoreMask = enum(u64) {
 };
 
 pub const RegisterId = union(enum) {
-    special: enum {
-        ip,
-        sp,
-        fp,
-    },
+    instruction_pointer,
+    stack_pointer,
+    frame_pointer,
+    return_address,
+
+    return_value,
     arg: u16,
+
     number: u16,
 };
 

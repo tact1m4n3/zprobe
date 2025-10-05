@@ -40,10 +40,10 @@ const target_def: Target = .{
     .vtable = &.{
         .system_reset = system_reset,
         .memory = ADI.Mem_AP.target_memory_vtable(@This(), "target", "core0_ap"),
-        .core_access = cortex_m.Multiplex(@This(), "target", &.{
+        .core_access = cortex_m.TargetCoreAccess(@This(), "target", &.{
             .{ .id = CORE0_ID, .memory_name = "core0_ap" },
             .{ .id = CORE1_ID, .memory_name = "core1_ap" },
-        }).core_access_vtable(),
+        }).vtable(),
     },
 };
 
@@ -69,16 +69,15 @@ fn do_system_reset(rp2040: *RP2040) !void {
     // reset system
     try rp2040.adi.dp_reg_write(RESCUE_DP, ADI.regs.dp.CTRL_STAT.addr, 0);
 
-    // after full chip reset, we should reinit adi and cores
+    // after full chip reset, we should reinit adi and mem aps
     try rp2040.adi.reinit();
-
     try rp2040.core0_ap.reinit();
     try rp2040.core1_ap.reinit();
 
     rp2040.target.attached_cores = .empty;
     rp2040.target.halted_cores = .empty;
 
-    // take the core out of rescue mode
+    // take the boot core out of rescue mode
     try rp2040.target.halt_reset(.boot);
 }
 

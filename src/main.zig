@@ -49,7 +49,7 @@ pub fn main() !void {
     while (true) {
         std.Thread.sleep(1 * std.time.ns_per_s);
         try rp2040.target.halt(.boot);
-        std.log.debug("ip: {x}", .{try rp2040.target.read_register(.boot, .{ .special = .ip })});
+        std.log.debug("ip: {x}", .{try rp2040.target.read_register(.boot, .instruction_pointer)});
         try rp2040.target.run(.boot);
     }
 }

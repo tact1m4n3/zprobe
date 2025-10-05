@@ -233,14 +233,14 @@ pub fn Register(reg_addr: u32, comptime T: type) type {
     };
 }
 
-pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: []const struct {
+pub fn TargetCoreAccess(Parent: type, comptime target_name: []const u8, comptime cpus: []const struct {
     id: Target.CoreId,
     memory_name: []const u8,
 }) type {
     return struct {
         const Self = @This();
 
-        pub fn core_access_vtable() Target.CoreAccessVtable {
+        pub fn vtable() Target.CoreAccessVtable {
             return .{
                 .attach = target_attach,
                 .detach = target_detach,
@@ -359,11 +359,11 @@ pub fn Multiplex(Parent: type, comptime target_name: []const u8, comptime cpus: 
 
 fn get_cm_reg(target_reg: Target.RegisterId) error{InvalidRegister}!RegisterId {
     return switch (target_reg) {
-        .special => |special| switch (special) {
-            .ip => .debug_return_address,
-            .sp => .sp,
-            .fp => .r11,
-        },
+        .instruction_pointer => .debug_return_address,
+        .stack_pointer => .sp,
+        .frame_pointer => .r11,
+        .return_address => .lr,
+        .return_value => .r0,
         .arg => |arg| if (arg < 4)
             @enumFromInt(arg)
         else
