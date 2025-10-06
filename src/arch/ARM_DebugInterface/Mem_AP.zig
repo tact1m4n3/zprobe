@@ -103,6 +103,7 @@ pub fn write_u32(mem_ap: *Mem_AP, addr: u64, value: u32) !void {
     try mem_ap.adi.ap_reg_write(mem_ap.address, regs.DRW.addr, value);
 }
 
+// TODO: implement efficient version (similar to write)
 pub fn read(mem_ap: *Mem_AP, addr: u64, data: []u8) !void {
     if (!mem_ap.support_other_sizes)
         return error.Unsupported;

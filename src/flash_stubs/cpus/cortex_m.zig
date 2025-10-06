@@ -24,10 +24,11 @@ pub const interrupt = struct {
 pub const ImageHeader = extern struct {
     const MAGIC = 0xBAD_C0FFE;
 
-    magic: u32 = MAGIC,
+    magic: u64 = MAGIC,
     page_size: u32,
     stack_pointer: *const anyopaque,
     return_address: *const fn () callconv(.naked) noreturn = return_address,
+    begin: *const fn () callconv(.c) void,
     verify: *const fn (addr: u32, data: [*]const u8, count: u32) callconv(.c) bool,
     erase: *const fn (addr: u32, count: u32) callconv(.c) void,
     program: *const fn (addr: u32, data: [*]const u8, count: u32) callconv(.c) void,
@@ -39,13 +40,15 @@ pub fn return_address() callconv(.naked) noreturn {
 }
 
 // chip independent
+pub fn default_begin() callconv(.c) void {}
+
+// chip independent
 pub fn default_verify(addr: u32, data: [*]const u8, count: u32) callconv(.c) bool {
     const flash_data: []const u8 = @as([*]const u8, @ptrFromInt(addr))[0..count];
     return std.mem.eql(u8, flash_data, data[0..count]);
 }
 
 pub const startup_logic = struct {
-    /// We don't care to actually run the firmware
     pub fn _start() callconv(.c) void {
         unreachable;
     }
@@ -53,6 +56,7 @@ pub const startup_logic = struct {
     pub var image_header: ImageHeader = .{
         .page_size = microzig.app.page_size,
         .stack_pointer = microzig.utilities.get_end_of_stack(),
+        .begin = if (@hasDecl(microzig.app, "begin")) microzig.app.begin else default_begin,
         .verify = if (@hasDecl(microzig.app, "verify")) microzig.app.verify else default_verify,
         .erase = microzig.app.erase,
         .program = microzig.app.program,

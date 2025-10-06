@@ -2,7 +2,6 @@ const std = @import("std");
 
 const Probe = @import("../Probe.zig");
 const ADI = @import("../arch/ARM_DebugInterface.zig");
-const Memory = @import("../Memory.zig");
 const Target = @import("../Target.zig");
 const cortex_m = ADI.cortex_m;
 const cortex_m_impl = cortex_m.Impl(ADI.Mem_AP);

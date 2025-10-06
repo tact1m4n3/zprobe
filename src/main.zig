@@ -41,7 +41,10 @@ pub fn main() !void {
         var elf_file_reader_buf: [4096]u8 = undefined;
         var elf_file_reader = elf_file.reader(&elf_file_reader_buf);
 
-        try flash.elf(allocator, &rp2040.target, &elf_file_reader);
+        var loader: flash.Loader(flash.StubFlasher) = .{ .flasher = try .init(&rp2040.target) };
+        defer loader.deinit(allocator);
+        try loader.add_elf(allocator, &elf_file_reader, rp2040.target.memory_map);
+        try loader.load(allocator, null);
     }
 
     try rp2040.target.reset(.all);
