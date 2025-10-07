@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const exe_run = b.addRunArtifact(exe);
-    exe_run.addArg("../microzig/examples/raspberrypi/rp2xxx/zig-out/firmware/pico_uart-log.elf");
+    exe_run.addArg("../microzig/examples/raspberrypi/rp2xxx/zig-out/firmware/pico_rtt-log.elf");
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&exe_run.step);
 }

@@ -103,30 +103,48 @@ pub fn write_u32(mem_ap: *Mem_AP, addr: u64, value: u32) !void {
     try mem_ap.adi.ap_reg_write(mem_ap.address, regs.DRW.addr, value);
 }
 
-// TODO: implement efficient version (similar to write)
 pub fn read(mem_ap: *Mem_AP, addr: u64, data: []u8) !void {
-    if (!mem_ap.support_other_sizes)
-        return error.Unsupported;
+    const bytes_before_start = std.mem.alignForward(u64, addr, 4) - addr;
+    const bytes_until_end = addr + data.len - std.mem.alignBackward(u64, addr + data.len, 4);
 
-    try mem_ap.set_access_size(.byte);
-
-    var offset: u64 = 0;
-    while (offset < data.len) {
-        const base_addr = addr + offset;
-        const max_count = max_transfer_size(base_addr);
-
-        try mem_ap.set_tar_address(base_addr);
-
-        // Bytes are aligned according to byte lanes
-        const count = @min(data.len - offset, max_count);
-
-        try mem_ap.adi.ap_reg_read_repeated(mem_ap.address, regs.DRW.addr, mem_ap.tmp_buf[0..count]);
-
-        for (0..count) |i| {
-            data[offset + i] = @truncate(mem_ap.tmp_buf[i] >> @intCast(((base_addr + i) & 0b11) * 8));
+    if (bytes_before_start + bytes_until_end + @sizeOf(u32) < data.len) {
+        if (bytes_before_start > 0) {
+            try mem_ap.read_u8s(addr, data[0..bytes_before_start]);
         }
 
-        offset += count;
+        const aligned_data_len = data.len - bytes_before_start - bytes_until_end;
+        {
+            const aligned_data_words = aligned_data_len / @sizeOf(u32);
+
+            try mem_ap.set_access_size(.word);
+
+            var offset: u64 = 0;
+            while (offset < aligned_data_words) {
+                const base_addr = addr + bytes_before_start + offset * @sizeOf(u32);
+                const max_count = max_transfer_size(base_addr) / @sizeOf(u32);
+
+                try mem_ap.set_tar_address(base_addr);
+
+                const count = @min(aligned_data_words - offset, max_count);
+
+                try mem_ap.adi.ap_reg_read_repeated(mem_ap.address, regs.DRW.addr, mem_ap.tmp_buf[0..count]);
+
+                for (mem_ap.tmp_buf[0..count], 0..) |word, i| {
+                    std.mem.writeInt(u32, data[bytes_before_start + (offset + i) * @sizeOf(u32) ..][0..4], word, .little);
+                }
+
+                offset += count;
+            }
+        }
+
+        if (bytes_until_end > 0) {
+            try mem_ap.read_u8s(
+                addr + bytes_before_start + aligned_data_len,
+                data[data.len - bytes_until_end ..],
+            );
+        }
+    } else {
+        try mem_ap.read_u8s(addr, data);
     }
 }
 
@@ -137,7 +155,7 @@ pub fn write(mem_ap: *Mem_AP, addr: u64, data: []const u8) !void {
     // if we have at least 1 aligned word
     if (bytes_before_start + bytes_until_end + @sizeOf(u32) < data.len) {
         if (bytes_before_start > 0) {
-            try mem_ap.write_u8_buf(addr, data[0..bytes_before_start]);
+            try mem_ap.write_u8s(addr, data[0..bytes_before_start]);
         }
 
         const aligned_data_len = data.len - bytes_before_start - bytes_until_end;
@@ -165,17 +183,43 @@ pub fn write(mem_ap: *Mem_AP, addr: u64, data: []const u8) !void {
         }
 
         if (bytes_until_end > 0) {
-            try mem_ap.write_u8_buf(
+            try mem_ap.write_u8s(
                 addr + bytes_before_start + aligned_data_len,
                 data[data.len - bytes_until_end ..],
             );
         }
     } else {
-        try mem_ap.write_u8_buf(addr, data);
+        try mem_ap.write_u8s(addr, data);
     }
 }
 
-fn write_u8_buf(mem_ap: *Mem_AP, addr: u64, data: []const u8) !void {
+fn read_u8s(mem_ap: *Mem_AP, addr: u64, data: []u8) !void {
+    if (!mem_ap.support_other_sizes)
+        return error.Unsupported;
+
+    try mem_ap.set_access_size(.byte);
+
+    var offset: u64 = 0;
+    while (offset < data.len) {
+        const base_addr = addr + offset;
+        const max_count = max_transfer_size(base_addr);
+
+        try mem_ap.set_tar_address(base_addr);
+
+        // Bytes are aligned according to byte lanes
+        const count = @min(data.len - offset, max_count);
+
+        try mem_ap.adi.ap_reg_read_repeated(mem_ap.address, regs.DRW.addr, mem_ap.tmp_buf[0..count]);
+
+        for (0..count) |i| {
+            data[offset + i] = @truncate(mem_ap.tmp_buf[i] >> @intCast(((base_addr + i) & 0b11) * 8));
+        }
+
+        offset += count;
+    }
+}
+
+fn write_u8s(mem_ap: *Mem_AP, addr: u64, data: []const u8) !void {
     if (!mem_ap.support_other_sizes) return error.Unsupported;
 
     try mem_ap.set_access_size(.byte);
