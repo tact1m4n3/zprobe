@@ -51,6 +51,8 @@ pub fn create_with_device(
                 .swj_sequence = adi_swj_sequence_impl,
                 .raw_reg_read = adi_raw_reg_read_impl,
                 .raw_reg_write = adi_raw_reg_write_impl,
+                .raw_reg_read_repeated = adi_raw_reg_read_repeated_impl,
+                .raw_reg_write_repeated = adi_raw_reg_write_repeated_impl,
             },
             .active_protocol = .swd,
         },
@@ -126,68 +128,57 @@ fn arm_debug_interface(ptr: *anyopaque) ?*ARM_DebugInterface {
 }
 
 pub fn connect(cmsis_dap: CMSIS_DAP, maybe_port: ?Protocol) !Protocol {
-    _ = try cmsis_dap.dev.write(&.{
-        @intFromEnum(Command.connect),
-        if (maybe_port) |port| @intFromEnum(port) else 0,
-    });
+    cmsis_dap.buf[0] = @intFromEnum(CommandId.connect);
+    cmsis_dap.buf[1] = if (maybe_port) |port| @intFromEnum(port) else 0;
+    _ = try cmsis_dap.dev.write(cmsis_dap.buf);
 
-    var resp: [2]u8 = undefined;
-    const n = try cmsis_dap.dev.read(&resp);
-    if (n != 2) return bad();
-    if (resp[0] != 0x02) return bad();
-    if (resp[1] == 0x00) return error.FailedToConnect;
-    const port = std.enums.fromInt(Protocol, resp[1]) orelse return bad();
+    _ = try cmsis_dap.dev.read(cmsis_dap.buf);
+    if (cmsis_dap.buf[0] != 0x02) return bad();
+    if (cmsis_dap.buf[1] == 0x00) return error.FailedToConnect;
+    const port = std.enums.fromInt(Protocol, cmsis_dap.buf[1]) orelse return bad();
     return port;
 }
 
 pub fn disconnect(cmsis_dap: CMSIS_DAP) !void {
-    _ = try cmsis_dap.dev.write(&.{@intFromEnum(Command.disconnect)});
+    cmsis_dap.buf[0] = @intFromEnum(CommandId.disconnect);
+    _ = try cmsis_dap.dev.write(cmsis_dap.buf);
 
-    var resp: [2]u8 = undefined;
-    const n = try cmsis_dap.dev.read(&resp);
-    if (n != 2) return bad();
-    if (resp[0] != 0x03) return bad();
-    try check_status(resp[1]);
+    _ = try cmsis_dap.dev.read(cmsis_dap.buf);
+    if (cmsis_dap.buf[0] != 0x03) return bad();
+    try check_status(cmsis_dap.buf[1]);
 }
 
 pub fn reset_target(cmsis_dap: CMSIS_DAP) !void {
-    _ = try cmsis_dap.dev.write(&.{@intFromEnum(Command.reset)});
+    cmsis_dap.buf[0] = @intFromEnum(CommandId.reset);
+    _ = try cmsis_dap.dev.write(cmsis_dap.buf);
 
-    var resp: [3]u8 = undefined;
-    const n = try cmsis_dap.dev.read(&resp);
-    if (n != 3) return bad();
-    if (resp[0] != 0x0A) return bad();
-    try check_status(resp[1]);
-    if (resp[2] != 0x01) return error.NoResetSequence;
+    _ = try cmsis_dap.dev.read(cmsis_dap.buf);
+    if (cmsis_dap.buf[0] != 0x0A) return bad();
+    try check_status(cmsis_dap.buf[1]);
+    if (cmsis_dap.buf[2] != 0x01) return error.NoResetSequence;
 }
 
 pub fn swj_clock(cmsis_dap: CMSIS_DAP, clock: u32) !void {
-    var req_buf: [5]u8 = undefined;
-    req_buf[0] = @intFromEnum(Command.swj_clock);
-    std.mem.writeInt(u32, req_buf[1..5], clock, .little);
+    cmsis_dap.buf[0] = @intFromEnum(CommandId.swj_clock);
+    std.mem.writeInt(u32, cmsis_dap.buf[1..5], clock, .little);
 
-    _ = try cmsis_dap.dev.write(&req_buf);
+    _ = try cmsis_dap.dev.write(cmsis_dap.buf);
 
-    var resp: [2]u8 = undefined;
-    const n = try cmsis_dap.dev.read(&resp);
-    if (n != 2) return bad();
-    if (resp[0] != 0x11) return bad();
-    try check_status(resp[1]);
+    _ = try cmsis_dap.dev.read(cmsis_dap.buf);
+    if (cmsis_dap.buf[0] != 0x11) return bad();
+    try check_status(cmsis_dap.buf[1]);
 }
 
 pub fn transfer_configure(cmsis_dap: CMSIS_DAP, idle_cycles: u8, wait_retries: u16, match_retries: u16) !void {
-    var req_buf: [6]u8 = undefined;
-    req_buf[0] = @intFromEnum(Command.transfer_configure);
-    req_buf[1] = idle_cycles;
-    std.mem.writeInt(u16, req_buf[2..4], wait_retries, .little);
-    std.mem.writeInt(u16, req_buf[4..6], match_retries, .little);
-    _ = try cmsis_dap.dev.write(&req_buf);
+    cmsis_dap.buf[0] = @intFromEnum(CommandId.transfer_configure);
+    cmsis_dap.buf[1] = idle_cycles;
+    std.mem.writeInt(u16, cmsis_dap.buf[2..4], wait_retries, .little);
+    std.mem.writeInt(u16, cmsis_dap.buf[4..6], match_retries, .little);
+    _ = try cmsis_dap.dev.write(cmsis_dap.buf);
 
-    var resp: [2]u8 = undefined;
-    const n = try cmsis_dap.dev.read(&resp);
-    if (n != 2) return bad();
-    if (resp[0] != 0x04) return bad();
-    try check_status(resp[1]);
+    _ = try cmsis_dap.dev.read(cmsis_dap.buf);
+    if (cmsis_dap.buf[0] != 0x04) return bad();
+    try check_status(cmsis_dap.buf[1]);
 }
 
 pub fn swj_sequence(
@@ -195,121 +186,149 @@ pub fn swj_sequence(
     bit_count: u8,
     sequence: u64,
 ) !void {
-    std.debug.assert(bit_count > 0 and bit_count <= 64);
+    if (bit_count == 0 or bit_count > 64) return error.InvalidBitCount;
 
-    var req_buf: [2 + @sizeOf(u64)]u8 = undefined;
-    req_buf[0] = @intFromEnum(Command.swj_sequence);
-    req_buf[1] = bit_count;
-    std.mem.writeVarPackedInt(req_buf[2..], 0, bit_count, sequence, .little);
+    cmsis_dap.buf[0] = @intFromEnum(CommandId.swj_sequence);
+    cmsis_dap.buf[1] = bit_count;
+    @memset(cmsis_dap.buf[2..][0..@sizeOf(u64)], 0);
+    std.mem.writeVarPackedInt(cmsis_dap.buf[2..], 0, bit_count, sequence, .little);
 
-    _ = try cmsis_dap.dev.write(req_buf[0 .. 2 + (bit_count + 7) / 8]);
+    _ = try cmsis_dap.dev.write(cmsis_dap.buf);
 
-    var resp: [2]u8 = undefined;
-    const n = try cmsis_dap.dev.read(&resp);
-    if (n != 2) return bad();
-    if (resp[0] != 0x12) return bad();
-    try check_status(resp[1]);
+    _ = try cmsis_dap.dev.read(cmsis_dap.buf);
+    if (cmsis_dap.buf[0] != 0x12) return bad();
+    try check_status(cmsis_dap.buf[1]);
 }
 
 pub fn reg_read(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, addr: u4) !u32 {
-    _ = try cmsis_dap.dev.write(&.{
-        @intFromEnum(Command.transfer),
-        cmsis_dap.dap_index,
-        1,
-        @bitCast(TransferRequest{
+    cmsis_dap.buf[0] = @intFromEnum(CommandId.transfer);
+    cmsis_dap.buf[1] = cmsis_dap.dap_index;
+    cmsis_dap.buf[2] = 1;
+    cmsis_dap.buf[3] = @bitCast(TransferRequest{
+        .port = switch (port) {
+            .dp => .dp,
+            .ap => .ap,
+        },
+        .cmd = .read,
+        .addr23 = @intCast(addr >> 2),
+    });
+    _ = try cmsis_dap.dev.write(cmsis_dap.buf);
+
+    _ = try cmsis_dap.dev.read(cmsis_dap.buf);
+    const transfer_response: TransferResponse = @bitCast(cmsis_dap.buf[2]);
+    if (transfer_response.protocol_error) return error.SWD_Protocol;
+    switch (transfer_response.ack) {
+        .ok => {},
+        .wait => return error.WaitTimeout,
+        .fault => return error.MemoryFault,
+        .no_ack => return error.NoResponse,
+    }
+    return std.mem.readInt(u32, cmsis_dap.buf[3..7], .little);
+}
+
+pub fn reg_write(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, addr: u4, value: u32) !void {
+    cmsis_dap.buf[0] = @intFromEnum(CommandId.transfer);
+    cmsis_dap.buf[1] = cmsis_dap.dap_index;
+    cmsis_dap.buf[2] = 1;
+    cmsis_dap.buf[3] = @bitCast(TransferRequest{
+        .port = switch (port) {
+            .dp => .dp,
+            .ap => .ap,
+        },
+        .cmd = .write,
+        .addr23 = @intCast(addr >> 2),
+    });
+    std.mem.writeInt(u32, cmsis_dap.buf[4..8], value, .little);
+    _ = try cmsis_dap.dev.write(cmsis_dap.buf);
+
+    _ = try cmsis_dap.dev.read(cmsis_dap.buf);
+    const transfer_response: TransferResponse = @bitCast(cmsis_dap.buf[2]);
+    if (transfer_response.protocol_error) return error.SWD_Protocol;
+    switch (transfer_response.ack) {
+        .ok => {},
+        .wait => return error.WaitTimeout,
+        .fault => return error.MemoryFault,
+        .no_ack => return error.NoResponse,
+    }
+}
+
+pub fn reg_read_repeated(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, addr: u4, data: []u32) !void {
+    const words_per_cmd = (cmsis_dap.buf.len - 5) / @sizeOf(u32);
+
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const words: u16 = @intCast(@min(words_per_cmd, data.len - offset)); // shouldn't fail as buf.len is max 512
+
+        cmsis_dap.buf[0] = @intFromEnum(CommandId.transfer_block);
+        cmsis_dap.buf[1] = cmsis_dap.dap_index;
+        std.mem.writeInt(u16, cmsis_dap.buf[2..4], words, .little);
+        cmsis_dap.buf[4] = @bitCast(TransferRequest{
             .port = switch (port) {
                 .dp => .dp,
                 .ap => .ap,
             },
             .cmd = .read,
             .addr23 = @intCast(addr >> 2),
-        }),
-    });
+        });
 
-    var resp: [7]u8 = undefined;
-    const n = try cmsis_dap.dev.read(&resp);
-    if (n <= 3) return bad();
+        _ = try cmsis_dap.dev.write(cmsis_dap.buf);
 
-    const transfer_response: TransferResponse = @bitCast(resp[2]);
-    if (transfer_response.protocol_error) return error.SWD_Protocol;
-    switch (transfer_response.ack) {
-        .ok => {},
-        .wait => return error.WaitTimeout,
-        .fault => return error.MemoryFault,
-        .no_ack => return error.NoResponse,
+        _ = try cmsis_dap.dev.read(cmsis_dap.buf);
+        const transfer_response: TransferResponse = @bitCast(cmsis_dap.buf[3]);
+        if (transfer_response.protocol_error) return error.SWD_Protocol;
+        switch (transfer_response.ack) {
+            .ok => {},
+            .wait => return error.WaitTimeout,
+            .fault => return error.MemoryFault,
+            .no_ack => return error.NoResponse,
+        }
+
+        for (data[offset..][0..words], 0..) |*value, i| {
+            value.* = std.mem.readInt(u32, cmsis_dap.buf[4 + i * 4..][0..4], .little);
+        }
+
+        offset += words;
     }
-
-    return std.mem.readInt(u32, resp[3..7], .little);
 }
 
-pub fn reg_write(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, addr: u4, value: u32) !void {
-    _ = try cmsis_dap.dev.write(&.{
-        @intFromEnum(Command.transfer),
-        cmsis_dap.dap_index,
-        1,
-        @bitCast(TransferRequest{
+pub fn reg_write_repeated(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, addr: u4, data: []const u32) !void {
+    const words_per_cmd = (cmsis_dap.buf.len - 5) / @sizeOf(u32);
+
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const words: u16 = @intCast(@min(words_per_cmd, data.len - offset)); // shouldn't fail as buf.len is max 512
+
+        cmsis_dap.buf[0] = @intFromEnum(CommandId.transfer_block);
+        cmsis_dap.buf[1] = cmsis_dap.dap_index;
+        std.mem.writeInt(u16, cmsis_dap.buf[2..4], words, .little);
+        cmsis_dap.buf[4] = @bitCast(TransferRequest{
             .port = switch (port) {
                 .dp => .dp,
                 .ap => .ap,
             },
             .cmd = .write,
             .addr23 = @intCast(addr >> 2),
-        }),
-        @intCast(value & 0xFF),
-        @intCast((value >> 8) & 0xFF),
-        @intCast((value >> 16) & 0xFF),
-        @intCast((value >> 24) & 0xFF),
-    });
+        });
 
-    var resp: [3]u8 = undefined;
-    const n = try cmsis_dap.dev.read(&resp);
-    if (n != 3) return bad();
+        for (data[offset..][0..words], 0..) |value, i| {
+            std.mem.writeInt(u32, cmsis_dap.buf[5 + i * 4..][0..4], value, .little);
+        }
 
-    const transfer_response: TransferResponse = @bitCast(resp[2]);
-    if (transfer_response.protocol_error) return error.SWD_Protocol;
-    switch (transfer_response.ack) {
-        .ok => {},
-        .wait => return error.WaitTimeout,
-        .fault => return error.MemoryFault,
-        .no_ack => return error.NoResponse,
+        _ = try cmsis_dap.dev.write(cmsis_dap.buf);
+
+        _ = try cmsis_dap.dev.read(cmsis_dap.buf);
+        const transfer_response: TransferResponse = @bitCast(cmsis_dap.buf[3]);
+        if (transfer_response.protocol_error) return error.SWD_Protocol;
+        switch (transfer_response.ack) {
+            .ok => {},
+            .wait => return error.WaitTimeout,
+            .fault => return error.MemoryFault,
+            .no_ack => return error.NoResponse,
+        }
+
+        offset += words;
     }
 }
-
-// pub fn reg_read_repeated(probe: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, addr: u4, data: []u32) !void {
-//     const words_per_block = (probe.buf.len - 5) / @sizeOf(u32);
-//
-//     probe.buf[0] = @intFromEnum(Command.transfer_block);
-//     probe.buf[1] = probe.dap_index;
-//     // we skip length of transfer for now
-//     probe.buf[4] = @bitCast(TransferRequest{
-//         .port = switch (port) {
-//             .dp => .dp,
-//             .ap => .ap,
-//         },
-//         .cmd = .read,
-//         .addr23 = @intCast(addr >> 2),
-//     });
-//
-//     var data_offset: usize = 0;
-//     while (offset < data.len) {
-//         const words: u16 = @intCast(@min(words_per_block, data.len - offset)); // shouldn't fail as buf.len is max 512
-//
-//         // write transfer length
-//         std.mem.writeInt(u16, probe.buf[2..4], words, .little);
-//
-//         offset += words;
-//     }
-//
-//     var resp: [7]u8 = undefined;
-//     const n = try probe.dev.read(&resp);
-//     if (n <= 3) return bad();
-//
-//     const transfer_response: TransferResponse = @bitCast(resp[2]);
-//     if (transfer_response.ack != .ok or transfer_response.protocol_error or transfer_response.value_mismatch)
-//         return error.FailedToRead;
-//
-//     return std.mem.readInt(u32, resp[3..7], .little);
-// }
 
 fn adi_swj_sequence_impl(adi: *ARM_DebugInterface, bit_count: u8, sequence: u64) ARM_DebugInterface.Error!void {
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
@@ -333,6 +352,24 @@ fn adi_raw_reg_write_impl(adi: *ARM_DebugInterface, port: ARM_DebugInterface.Reg
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     cmsis_dap.reg_write(port, addr, value) catch |err| {
+        std.log.debug("failed to write register: {t}", .{err});
+        return error.CommandFailed;
+    };
+}
+
+fn adi_raw_reg_read_repeated_impl(adi: *ARM_DebugInterface, port: ARM_DebugInterface.RegisterPort, addr: u4, data: []u32) ARM_DebugInterface.Error!void {
+    const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
+
+    return cmsis_dap.reg_read_repeated(port, addr, data) catch |err| {
+        std.log.debug("failed to read register: {t}", .{err});
+        return error.CommandFailed;
+    };
+}
+
+fn adi_raw_reg_write_repeated_impl(adi: *ARM_DebugInterface, port: ARM_DebugInterface.RegisterPort, addr: u4, data: []const u32) ARM_DebugInterface.Error!void {
+    const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
+
+    cmsis_dap.reg_write_repeated(port, addr, data) catch |err| {
         std.log.debug("failed to write register: {t}", .{err});
         return error.CommandFailed;
     };
@@ -430,7 +467,7 @@ pub const CMSIS_DAP_Device = struct {
         };
 
         _ = try dev.write(&.{
-            @intFromEnum(Command.info),
+            @intFromEnum(CommandId.info),
             @intFromEnum(Info_ID.packet_size),
         });
 
@@ -463,7 +500,7 @@ pub const CMSIS_DAP_Device = struct {
     }
 };
 
-pub const Command = enum(u8) {
+pub const CommandId = enum(u8) {
     info = 0x00,
     connect = 0x02,
     disconnect = 0x03,
@@ -473,18 +510,8 @@ pub const Command = enum(u8) {
     reset = 0x0A,
     swj_clock = 0x11,
     swj_sequence = 0x12,
-
-    // info: Info_ID,
-    // connect: ?Port,
-    // disconnect: void,
-    // transfer_configure: struct {
-    //     idle_cycles: u8,
-    //     wait_retries: u16,
-    //     match_retries: u16,
-    // },
-    // transfer: struct {
-    //
-    // },
+    queue_commands = 0x7E,
+    execute_commands = 0x7F,
 };
 
 pub const Info_ID = enum(u8) {
