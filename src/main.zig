@@ -5,6 +5,7 @@ const Probe = @import("Probe.zig");
 const Target = @import("Target.zig");
 const arch = @import("arch.zig");
 const targets = @import("targets.zig");
+const elf = @import("elf.zig");
 const flash = @import("flash.zig");
 const RTT_Host = @import("RTT_Host.zig");
 
@@ -23,6 +24,15 @@ pub fn main() !void {
     _ = try libusb.call(libusb.c.libusb_init(null));
     defer libusb.c.libusb_exit(null);
 
+    const elf_path = args[1];
+    const elf_file = try std.fs.cwd().openFile(elf_path, .{});
+    defer elf_file.close();
+
+    var elf_file_reader_buf: [4096]u8 = undefined;
+    var elf_file_reader = elf_file.reader(&elf_file_reader_buf);
+    var elf_info: elf.Info = try .init(allocator, &elf_file_reader);
+    defer elf_info.deinit(allocator);
+
     var probe: Probe = try .create(allocator, .{});
     defer probe.destroy();
 
@@ -34,23 +44,16 @@ pub fn main() !void {
 
     try rp2040.target.system_reset();
 
-    // const elf_path = args[1];
-    // {
-    //     const elf_file = try std.fs.cwd().openFile(elf_path, .{});
-    //     defer elf_file.close();
-    //
-    //     var elf_file_reader_buf: [4096]u8 = undefined;
-    //     var elf_file_reader = elf_file.reader(&elf_file_reader_buf);
-    //
-    //     var loader: flash.Loader(flash.StubFlasher) = .{ .flasher = try .init(&rp2040.target) };
-    //     defer loader.deinit(allocator);
-    //     try loader.add_elf(allocator, &elf_file_reader, rp2040.target.memory_map);
-    //     try loader.load(allocator, null);
-    // }
+    {
+        var loader: flash.Loader(flash.StubFlasher) = .{ .flasher = try .init(&rp2040.target) };
+        defer loader.deinit(allocator);
+        try loader.add_elf(allocator, &elf_file_reader, elf_info, rp2040.target.memory_map);
+        try loader.load(allocator, null);
+    }
 
     try rp2040.target.reset(.all);
 
-    const rtt_host: RTT_Host = try .init(&rp2040.target);
+    const rtt_host: RTT_Host = try .init(&rp2040.target, elf_info);
     std.log.debug("found rtt at 0x{x}", .{rtt_host.control_block_address});
 
     while (true) {

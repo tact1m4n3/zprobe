@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Timeout = @import("Timeout.zig");
 const Target = @import("Target.zig");
+const elf = @import("elf.zig");
 
 pub fn Loader(Flasher: type) type {
     return struct {
@@ -20,35 +21,30 @@ pub fn Loader(Flasher: type) type {
         pub fn add_elf(
             loader: *Self,
             allocator: std.mem.Allocator,
-            elf_reader: *std.fs.File.Reader,
+            elf_file_reader: *std.fs.File.Reader,
+            elf_info: elf.Info,
             memory_map: []const Target.MemoryRegion,
         ) !void {
-            const header = try std.elf.Header.read(&elf_reader.interface);
-
             var new_segments: std.ArrayList(Segment) = .empty;
             defer new_segments.deinit(allocator);
             errdefer for (new_segments.items) |segment| allocator.free(segment.data);
 
-            var ph_iterator = header.iterateProgramHeaders(elf_reader);
-            while (try ph_iterator.next()) |ph| {
-                if (ph.p_type != std.elf.PT_LOAD) continue;
-                if (ph.p_filesz == 0) continue;
-
-                const kind = try find_memory_region_kind(memory_map, ph.p_paddr, ph.p_filesz);
+            for (elf_info.load_segments.items) |elf_seg| {
+                const kind = try find_memory_region_kind(memory_map, elf_seg.physical_address, elf_seg.file_size);
                 if (kind != .flash) {
                     std.log.warn("found non flash segment", .{});
                     continue;
                 }
 
-                const data = try allocator.alloc(u8, ph.p_memsz);
+                const data = try allocator.alloc(u8, elf_seg.memory_size);
                 errdefer allocator.free(data);
-                if (ph.p_filesz > ph.p_memsz) return error.MalformedElf;
-                try elf_reader.seekTo(ph.p_offset);
-                try elf_reader.interface.readSliceAll(data[0..ph.p_filesz]);
-                @memset(data[ph.p_filesz..], 0);
+
+                try elf_file_reader.seekTo(elf_seg.file_offset);
+                try elf_file_reader.interface.readSliceAll(data[0..elf_seg.file_size]);
+                @memset(data[elf_seg.file_size..], 0);
 
                 const segment: Segment = .{
-                    .addr = ph.p_paddr,
+                    .addr = elf_seg.physical_address,
                     .data = data,
                 };
                 try segment.check_overlapping(new_segments.items);

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Target = @import("Target.zig");
+const elf = @import("elf.zig");
 
 const RTT_Host = @This();
 
@@ -7,7 +8,13 @@ const SEGGER_RTT_ID: [16]u8 = "SEGGER RTT";
 
 control_block_address: u64,
 
-pub fn init(target: *Target) !RTT_Host {
+pub const BlockLocation = union(enum) {
+    section_name: []const u8,
+    symbol_name: []const u8,
+};
+
+pub fn init(target: *Target, elf_info: elf.Info) !RTT_Host {
+    _ = elf_info; // autofix
     const control_block_find_result = try find_control_block(target) orelse return error.MissingControlBlock;
     std.debug.print("{any}\n", .{control_block_find_result.header});
     return .{
