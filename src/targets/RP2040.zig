@@ -31,6 +31,7 @@ target: Target,
 
 const target_def: Target = .{
     .name = "RP2040",
+    .endian = .little,
     .valid_cores = .with_ids(&.{ CORE0_ID, CORE1_ID }),
     .memory_map = &.{
         .{ .offset = 0x10000000, .length = 2048 * 1024, .kind = .flash },

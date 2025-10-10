@@ -11,6 +11,7 @@ pub const Target = @This();
 // - implement locking mechanism for different parts (individual cores and memory)
 
 name: []const u8,
+endian: std.builtin.Endian,
 valid_cores: CoreMask,
 attached_cores: CoreMask = .empty,
 halted_cores: CoreMask = .empty,
@@ -253,4 +254,38 @@ pub const MemoryRegion = struct {
         flash,
         ram,
     };
+};
+
+pub const MemoryReader = struct {
+    interface: std.Io.Reader,
+    target: *Target,
+    address: u64 = 0,
+
+    pub fn init(target: *Target, buffer: []u8, address: u64) MemoryReader {
+        return .{
+            .interface = init_interface(buffer),
+            .target = target,
+            .address = address,
+        };
+    }
+
+    pub fn init_interface(buffer: []u8) std.Io.Reader {
+        return .{
+            .buffer = buffer,
+            .seek = 0,
+            .end = 0,
+            .vtable = &.{
+                .stream = stream,
+            },
+        };
+    }
+
+    pub fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.Error!usize {
+        const memory_reader: *MemoryReader = @alignCast(@fieldParentPtr("interface", r));
+
+        const buf = limit.slice(w.writableSliceGreedy(1) catch return error.ReadFailed);
+        memory_reader.target.read_memory(memory_reader.address, buf) catch return error.ReadFailed;
+        memory_reader.address += buf.len;
+        return buf.len;
+    }
 };

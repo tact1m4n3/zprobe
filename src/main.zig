@@ -53,13 +53,16 @@ pub fn main() !void {
 
     try rp2040.target.reset(.all);
 
-    const rtt_host: RTT_Host = try .init(&rp2040.target, elf_info);
+    var rtt_host: RTT_Host = try .init(allocator, &rp2040.target, .{
+        .elf_file_reader = &elf_file_reader,
+        .elf_info = elf_info,
+    }, null);
+    defer rtt_host.deinit(allocator);
     std.log.debug("found rtt at 0x{x}", .{rtt_host.control_block_address});
 
+    var buf: [1024]u8 = undefined;
     while (true) {
-        std.Thread.sleep(1 * std.time.ns_per_s);
-        try rp2040.target.halt(.boot);
-        std.log.debug("ip: {x}", .{try rp2040.target.read_register(.boot, .instruction_pointer)});
-        try rp2040.target.run(.boot);
+        const n = try rtt_host.read(&rp2040.target, 0, &buf);
+        std.debug.print("{s}", .{buf[0..n]});
     }
 }
