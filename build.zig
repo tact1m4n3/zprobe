@@ -11,27 +11,31 @@ pub fn build(b: *std.Build) void {
         .system_libudev = true,
     });
 
-    const exe = b.addExecutable(.{
-        .name = "zprobe",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
+    const mod = b.addModule("zprobe", .{
+        .root_source_file = b.path("src/zprobe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
     });
-    exe.linkLibrary(libusb_dep.artifact("usb"));
+    mod.linkLibrary(libusb_dep.artifact("usb"));
 
     if (generate_flash_stubs_bundle(b)) |flash_stubs_bundle|
-        exe.root_module.addAnonymousImport("flash_stubs_bundle.tar", .{
+        mod.addAnonymousImport("flash_stubs_bundle.tar", .{
             .root_source_file = flash_stubs_bundle,
         });
-    b.installArtifact(exe);
 
-    const exe_run = b.addRunArtifact(exe);
-    exe_run.addArg("../microzig/examples/raspberrypi/rp2xxx/zig-out/firmware/pico_rtt-log.elf");
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&exe_run.step);
+    const example_exe = b.addExecutable(.{
+        .name = "rp2040_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/rp2040.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zprobe", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(example_exe);
 }
 
 fn generate_flash_stubs_bundle(b: *std.Build) ?std.Build.LazyPath {

@@ -1,13 +1,5 @@
 const std = @import("std");
-
-const libusb = @import("libusb.zig");
-const Probe = @import("Probe.zig");
-const Target = @import("Target.zig");
-const arch = @import("arch.zig");
-const targets = @import("targets.zig");
-const elf = @import("elf.zig");
-const flash = @import("flash.zig");
-const RTT_Host = @import("RTT_Host.zig");
+const zprobe = @import("zprobe");
 
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
@@ -17,12 +9,9 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
     if (args.len < 2) {
-        std.log.err("Usage: zprobe <elf>", .{});
+        std.log.err("Usage: rp2040_example <elf>", .{});
         return error.Usage;
     }
-
-    _ = try libusb.call(libusb.c.libusb_init(null));
-    defer libusb.c.libusb_exit(null);
 
     const elf_path = args[1];
     const elf_file = try std.fs.cwd().openFile(elf_path, .{});
@@ -30,22 +19,25 @@ pub fn main() !void {
 
     var elf_file_reader_buf: [4096]u8 = undefined;
     var elf_file_reader = elf_file.reader(&elf_file_reader_buf);
-    var elf_info: elf.Info = try .init(allocator, &elf_file_reader);
+    var elf_info: zprobe.elf.Info = try .init(allocator, &elf_file_reader);
     defer elf_info.deinit(allocator);
 
-    var probe: Probe = try .create(allocator, .{});
+    _ = try zprobe.libusb.call(zprobe.libusb.c.libusb_init(null));
+    defer zprobe.libusb.c.libusb_exit(null);
+
+    var probe: zprobe.Probe = try .create(allocator, .{});
     defer probe.destroy();
 
     try probe.attach(.mhz(1));
     defer probe.detach();
 
-    var rp2040: targets.RP2040 = try .init(probe);
+    var rp2040: zprobe.targets.RP2040 = try .init(probe);
     defer rp2040.deinit();
 
     try rp2040.target.system_reset();
 
     {
-        var loader: flash.Loader(flash.StubFlasher) = .{ .flasher = try .init(&rp2040.target) };
+        var loader: zprobe.flash.Loader(zprobe.flash.StubFlasher) = .{ .flasher = try .init(&rp2040.target) };
         defer loader.deinit(allocator);
         try loader.add_elf(allocator, &elf_file_reader, elf_info, rp2040.target.memory_map);
         try loader.load(allocator, null);
@@ -53,7 +45,7 @@ pub fn main() !void {
 
     try rp2040.target.reset(.all);
 
-    var rtt_host: RTT_Host = try .init(allocator, &rp2040.target, .{
+    var rtt_host: zprobe.RTT_Host = try .init(allocator, &rp2040.target, .{
         .elf_file_reader = &elf_file_reader,
         .elf_info = elf_info,
     }, null);
