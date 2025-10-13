@@ -4,137 +4,141 @@ const Timeout = @import("Timeout.zig");
 const Target = @import("Target.zig");
 const elf = @import("elf.zig");
 
-pub fn Loader(Flasher: type) type {
-    return struct {
-        const Self = @This();
+pub const Loader = struct {
+    segments: std.ArrayList(Segment) = .empty,
 
-        flasher: Flasher,
-        segments: std.ArrayList(Segment) = .empty,
-
-        pub fn deinit(loader: *Self, allocator: std.mem.Allocator) void {
-            for (loader.segments.items) |segment| {
-                allocator.free(segment.data);
-            }
-            loader.segments.deinit(allocator);
+    pub fn deinit(loader: *Loader, allocator: std.mem.Allocator) void {
+        for (loader.segments.items) |segment| {
+            allocator.free(segment.data);
         }
+        loader.segments.deinit(allocator);
+    }
 
-        pub fn add_elf(
-            loader: *Self,
-            allocator: std.mem.Allocator,
-            elf_file_reader: *std.fs.File.Reader,
-            elf_info: elf.Info,
-            memory_map: []const Target.MemoryRegion,
-        ) !void {
-            var new_segments: std.ArrayList(Segment) = .empty;
-            defer new_segments.deinit(allocator);
-            errdefer for (new_segments.items) |segment| allocator.free(segment.data);
+    pub fn add_elf(
+        loader: *Loader,
+        allocator: std.mem.Allocator,
+        elf_file_reader: *std.fs.File.Reader,
+        elf_info: elf.Info,
+        memory_map: []const Target.MemoryRegion,
+    ) !void {
+        var new_segments: std.ArrayList(Segment) = .empty;
+        defer new_segments.deinit(allocator);
+        errdefer for (new_segments.items) |segment| allocator.free(segment.data);
 
-            for (elf_info.load_segments.items) |elf_seg| {
-                const kind = try find_memory_region_kind(memory_map, elf_seg.physical_address, elf_seg.file_size);
-                if (kind != .flash) {
-                    std.log.warn("found non flash segment", .{});
-                    continue;
-                }
-
-                const data = try allocator.alloc(u8, elf_seg.memory_size);
-                errdefer allocator.free(data);
-
-                try elf_file_reader.seekTo(elf_seg.file_offset);
-                try elf_file_reader.interface.readSliceAll(data[0..elf_seg.file_size]);
-                @memset(data[elf_seg.file_size..], 0);
-
-                const segment: Segment = .{
-                    .addr = elf_seg.physical_address,
-                    .data = data,
-                };
-                try segment.check_overlapping(new_segments.items);
-                try segment.check_overlapping(loader.segments.items);
-                try new_segments.append(allocator, segment);
+        for (elf_info.load_segments.items) |elf_seg| {
+            const kind = try find_memory_region_kind(memory_map, elf_seg.physical_address, elf_seg.file_size);
+            if (kind != .flash) {
+                std.log.warn("found non flash segment", .{});
+                continue;
             }
 
-            try loader.segments.ensureUnusedCapacity(allocator, new_segments.items.len);
-            loader.segments.appendSliceAssumeCapacity(new_segments.items);
-            std.mem.sort(Segment, loader.segments.items, {}, Segment.is_less);
-        }
+            const data = try allocator.alloc(u8, elf_seg.memory_size);
+            errdefer allocator.free(data);
 
-        pub fn add_segments(loader: *Self, allocator: std.mem.Allocator, new_segments: []const Segment) !void {
-            for (new_segments) |segment| {
-                try segment.check_overlapping(loader.segments.items);
-            }
-            try loader.segments.ensureUnusedCapacity(allocator, new_segments.len);
-            loader.segments.appendSliceAssumeCapacity(new_segments);
-            std.mem.sort(Segment, loader.segments.items, {}, Segment.is_less);
-        }
+            try elf_file_reader.seekTo(elf_seg.file_offset);
+            try elf_file_reader.interface.readSliceAll(data[0..elf_seg.file_size]);
+            @memset(data[elf_seg.file_size..], 0);
 
-        pub fn load(loader: *Self, allocator: std.mem.Allocator, maybe_chunk_size: ?u64) !void {
-            const chunk_size = maybe_chunk_size orelse loader.flasher.page_size;
-            std.debug.assert(chunk_size <= loader.flasher.max_chunk_size);
-
-            const chunk_data = try allocator.alloc(u8, chunk_size);
-            defer allocator.free(chunk_data);
-
-            const ChunkInfo = struct {
-                addr: u64,
-                end: u64,
+            const segment: Segment = .{
+                .addr = elf_seg.physical_address,
+                .data = data,
             };
-            var maybe_current_chunk: ?ChunkInfo = null;
+            try segment.check_overlapping(new_segments.items);
+            try segment.check_overlapping(loader.segments.items);
+            try new_segments.append(allocator, segment);
+        }
 
-            try loader.flasher.begin();
+        try loader.segments.ensureUnusedCapacity(allocator, new_segments.items.len);
+        loader.segments.appendSliceAssumeCapacity(new_segments.items);
+        std.mem.sort(Segment, loader.segments.items, {}, Segment.is_less);
+    }
 
-            for (loader.segments.items) |segment| {
-                if (maybe_current_chunk) |*current_chunk| {
-                    if (segment.addr < current_chunk.addr + chunk_size) {
-                        const splat_length = segment.addr - (current_chunk.addr + current_chunk.end);
-                        @memset(chunk_data[current_chunk.end..][0..splat_length], 0);
-                        current_chunk.end += splat_length;
-                    } else {
-                        if (current_chunk.end < chunk_size)
-                            @memset(chunk_data[current_chunk.end..], 0);
-                        try loader.flasher.load(current_chunk.addr, chunk_data);
-                        maybe_current_chunk = null;
-                    }
+    pub fn add_segments(loader: *Loader, allocator: std.mem.Allocator, new_segments: []const Segment) !void {
+        for (new_segments) |segment| {
+            try segment.check_overlapping(loader.segments.items);
+        }
+        try loader.segments.ensureUnusedCapacity(allocator, new_segments.len);
+        loader.segments.appendSliceAssumeCapacity(new_segments);
+        std.mem.sort(Segment, loader.segments.items, {}, Segment.is_less);
+    }
+
+    pub fn bake(loader: Loader, allocator: std.mem.Allocator, chunk_size: u64, page_size: u64) !Output {
+        var data: std.Io.Writer.Allocating = .init(allocator);
+        defer data.deinit();
+
+        var addrs: std.ArrayList(u64) = .empty;
+        defer addrs.deinit(allocator);
+
+        const ChunkInfo = struct {
+            addr: u64,
+            end: u64,
+        };
+        var maybe_current_chunk: ?ChunkInfo = null;
+
+        for (loader.segments.items) |segment| {
+            if (maybe_current_chunk) |*current_chunk| {
+                if (segment.addr < current_chunk.addr + chunk_size) {
+                    const splat_length = segment.addr - (current_chunk.addr + current_chunk.end);
+                    try data.writer.splatByteAll(0, splat_length);
+                    current_chunk.end += splat_length;
+                } else {
+                    if (current_chunk.end < chunk_size)
+                        try data.writer.splatByteAll(0, chunk_size - current_chunk.end);
+
+                    try addrs.append(allocator, current_chunk.addr);
+                    maybe_current_chunk = null;
                 }
+            }
 
-                if (maybe_current_chunk == null) {
-                    const aligned_addr = std.mem.alignBackward(u64, segment.addr, loader.flasher.page_size);
-                    const splat_length = segment.addr - aligned_addr;
-                    @memset(chunk_data[0..splat_length], 0);
+            if (maybe_current_chunk == null) {
+                const aligned_addr = std.mem.alignBackward(u64, segment.addr, page_size);
+                const splat_length = segment.addr - aligned_addr;
+                try data.writer.splatByteAll(0, splat_length);
+                maybe_current_chunk = .{
+                    .addr = aligned_addr,
+                    .end = splat_length,
+                };
+            }
+
+            var offset: u64 = 0;
+            while (offset < segment.data.len) {
+                const current_chunk = unwrap_mut_opt(ChunkInfo, &maybe_current_chunk);
+
+                const count = @min(chunk_size - current_chunk.end, segment.data.len - offset);
+
+                try data.writer.writeAll(segment.data[offset..][0..count]);
+                offset += count;
+                current_chunk.end += count;
+
+                if (current_chunk.end == chunk_size) {
+                    try addrs.append(allocator, current_chunk.addr);
                     maybe_current_chunk = .{
-                        .addr = aligned_addr,
-                        .end = splat_length,
+                        .addr = current_chunk.addr + chunk_size,
+                        .end = 0,
                     };
                 }
-
-                var offset: u64 = 0;
-                while (offset < segment.data.len) {
-                    const current_chunk = unwrap_mut_opt(ChunkInfo, &maybe_current_chunk);
-
-                    const count = @min(chunk_size - current_chunk.end, segment.data.len - offset);
-                    @memcpy(chunk_data[current_chunk.end..][0..count], segment.data[offset..][0..count]);
-                    offset += count;
-                    current_chunk.end += count;
-
-                    if (current_chunk.end == chunk_size) {
-                        try loader.flasher.load(current_chunk.addr, chunk_data);
-                        maybe_current_chunk = .{
-                            .addr = current_chunk.addr + chunk_size,
-                            .end = 0,
-                        };
-                    }
-                }
             }
-
-            if (maybe_current_chunk) |chunk| {
-                if (chunk.end == 0) return;
-                if (chunk.end < chunk_size)
-                    @memset(chunk_data[chunk.end..], 0);
-                try loader.flasher.load(chunk.addr, chunk_data);
-            }
-
-            try loader.flasher.end();
         }
-    };
-}
+
+        if (maybe_current_chunk) |chunk| {
+            if (chunk.end != 0) {
+                if (chunk.end < chunk_size)
+                    try data.writer.splatByteAll(0, chunk_size - chunk.end);
+                try addrs.append(allocator, chunk.addr);
+            }
+        }
+
+        const data_owned = try data.toOwnedSlice();
+        errdefer allocator.free(data_owned);
+        const addrs_owned = try addrs.toOwnedSlice(allocator);
+        errdefer allocator.free(addrs_owned);
+        return .{
+            .data = data_owned,
+            .addrs = addrs_owned,
+            .chunk_size = chunk_size,
+        };
+    }
+};
 
 pub const Segment = struct {
     addr: u64,
@@ -150,6 +154,25 @@ pub const Segment = struct {
                 segment.addr + segment.data.len > other_segment.addr)
                 return error.OverlappingSegment;
         }
+    }
+};
+
+pub const Output = struct {
+    data: []const u8,
+    addrs: []const u64,
+    chunk_size: u64,
+
+    pub fn deinit(output: Output, allocator: std.mem.Allocator) void {
+        allocator.free(output.data);
+        allocator.free(output.addrs);
+    }
+
+    pub fn load(output: Output, flasher: anytype) !void {
+        try flasher.begin();
+        for (output.addrs, 0..) |addr, i| {
+            try flasher.load(addr, output.data[i * output.chunk_size ..][0..output.chunk_size]);
+        }
+        try flasher.end();
     }
 };
 
@@ -437,52 +460,22 @@ pub const DebugFlasher = struct {
     }
 };
 
-pub const TestFlasher = struct {
-    page_size: u64 = 8,
-    max_chunk_size: u64 = 32,
-    pages: []const ExpectedPage,
-
-    pub const ExpectedPage = struct {
-        addr: u64,
-        data: []const u8,
-    };
-
-    pub fn begin(_: TestFlasher) !void {}
-    pub fn end(_: TestFlasher) !void {}
-
-    pub fn load(flasher: TestFlasher, addr: u64, data: []const u8) !void {
-        try std.testing.expect(std.mem.isAligned(addr, flasher.page_size));
-        try std.testing.expect(std.mem.isAligned(data.len, flasher.page_size));
-        try std.testing.expect(data.len <= flasher.max_chunk_size);
-
-        var offset: usize = 0;
-        while (offset < data.len) : (offset += flasher.page_size) {
-            for (flasher.pages) |page| {
-                if (addr + offset == page.addr) {
-                    try std.testing.expectEqualSlices(u8, page.data, data[offset..][0..flasher.page_size]);
-                    break;
-                }
-            } else {
-                std.debug.print("address 0x{x} not expected\n", .{addr + offset});
-                return error.UnexpectedChunkAddress;
-            }
-        }
-    }
-};
-
 test "load_segments" {
-    const test_flasher: TestFlasher = .{
-        .pages = &.{
-            .{ .addr = 0x00, .data = &.{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00 } },
-            .{ .addr = 0x08, .data = &.{ 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x00 } },
-            .{ .addr = 0x10, .data = &.{ 0x01, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x0A } },
-            .{ .addr = 0x18, .data = &.{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } },
-        },
+    // zig fmt: off
+    const expected_data: []const u8 = &.{
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00,
+        0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x00,
+        0x01, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x0A,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
+    // zig fmt: on
+    const expected_addrs: []const u64 = &.{ 0x00, 0x10 };
+    const chunk_size = 16;
+    const page_size = 8;
 
     const allocator = std.testing.allocator;
 
-    var loader: Loader(TestFlasher) = .{ .flasher = test_flasher };
+    var loader: Loader = .{};
     defer loader.deinit(allocator);
     try loader.add_segments(allocator, &.{
         .{ .addr = 0x00, .data = try allocator.dupe(u8, &.{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 }) },
@@ -493,9 +486,11 @@ test "load_segments" {
         .{ .addr = 0x17, .data = try allocator.dupe(u8, &.{0x0A}) },
     });
 
-    try loader.load(allocator, null);
-    try loader.load(allocator, 16);
-    try loader.load(allocator, 32);
+    const output = try loader.bake(allocator, chunk_size, page_size);
+    defer output.deinit(allocator);
+
+    try std.testing.expectEqualSlices(u8, expected_data, output.data);
+    try std.testing.expectEqualSlices(u64, expected_addrs, output.addrs);
 }
 
 // TODO: relocate this

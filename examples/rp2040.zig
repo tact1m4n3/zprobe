@@ -37,10 +37,15 @@ pub fn main() !void {
     try rp2040.target.system_reset();
 
     {
-        var loader: zprobe.flash.Loader(zprobe.flash.StubFlasher) = .{ .flasher = try .init(&rp2040.target) };
+        const stub_flasher: zprobe.flash.StubFlasher = try .init(&rp2040.target);
+
+        var loader: zprobe.flash.Loader = .{};
         defer loader.deinit(allocator);
         try loader.add_elf(allocator, &elf_file_reader, elf_info, rp2040.target.memory_map);
-        try loader.load(allocator, null);
+
+        const output = try loader.bake(allocator, 4 * stub_flasher.page_size, stub_flasher.page_size);
+        defer output.deinit(allocator);
+        try output.load(stub_flasher);
     }
 
     try rp2040.target.reset(.all);
@@ -50,11 +55,12 @@ pub fn main() !void {
         .elf_info = elf_info,
     }, null);
     defer rtt_host.deinit(allocator);
-    std.log.debug("found rtt at 0x{x}", .{rtt_host.control_block_address});
+
+    const stdout = std.fs.File.stdout();
 
     var buf: [1024]u8 = undefined;
     while (true) {
         const n = try rtt_host.read(&rp2040.target, 0, &buf);
-        std.debug.print("{s}", .{buf[0..n]});
+        try stdout.writeAll(buf[0..n]);
     }
 }
