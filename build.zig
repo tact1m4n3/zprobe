@@ -24,10 +24,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = flash_stubs_bundle,
         });
 
-    const example_exe = b.addExecutable(.{
-        .name = "rp2040_example",
+    const exe = b.addExecutable(.{
+        .name = "zprobe",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/rp2040.zig"),
+            .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(example_exe);
+    b.installArtifact(exe);
 }
 
 fn generate_flash_stubs_bundle(b: *std.Build) ?std.Build.LazyPath {

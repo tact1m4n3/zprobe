@@ -1,8 +1,28 @@
 const std = @import("std");
 
+const Progress = @import("Progress.zig");
 const Timeout = @import("Timeout.zig");
 const Target = @import("Target.zig");
 const elf = @import("elf.zig");
+
+pub fn load_elf(
+    allocator: std.mem.Allocator,
+    target: *Target,
+    elf_info: elf.Info,
+    elf_file_reader: *std.fs.File.Reader,
+    maybe_progress: ?*Progress,
+) !void {
+    const stub_flasher: StubFlasher = try .init(target);
+
+    var loader: Loader = .{};
+    defer loader.deinit(allocator);
+    try loader.add_elf(allocator, elf_file_reader, elf_info, target.memory_map);
+
+    const output = try loader.bake(allocator, stub_flasher.page_size, stub_flasher.page_size);
+    defer output.deinit(allocator);
+
+    try output.load(stub_flasher, maybe_progress);
+}
 
 pub const Loader = struct {
     segments: std.ArrayList(Segment) = .empty,
@@ -167,11 +187,21 @@ pub const Output = struct {
         allocator.free(output.addrs);
     }
 
-    pub fn load(output: Output, flasher: anytype) !void {
+    pub fn load(output: Output, flasher: anytype, maybe_progress: ?*Progress) !void {
+        if (maybe_progress) |progress| {
+            try progress.update(0, output.addrs.len);
+        }
+
         try flasher.begin();
+
         for (output.addrs, 0..) |addr, i| {
             try flasher.load(addr, output.data[i * output.chunk_size ..][0..output.chunk_size]);
+
+            if (maybe_progress) |progress| {
+                try progress.update(i + 1, output.addrs.len);
+            }
         }
+
         try flasher.end();
     }
 };
@@ -416,7 +446,6 @@ pub const StubFlasher = struct {
         });
 
         while (try it.next()) |file| {
-            std.debug.print("{s}\n", .{file.name});
             if (file.kind == .file and std.mem.eql(u8, name, file.name)) {
                 return try tar_reader.take(file.size);
             }

@@ -1,6 +1,21 @@
+const std = @import("std");
+
 pub const c = @cImport({
     @cInclude("libusb.h");
 });
+
+var instances: std.atomic.Value(usize) = .init(0);
+
+pub fn lib_init() USB_Error!void {
+    if (instances.fetchAdd(1, .acq_rel) == 0)
+        _ = try call(c.libusb_init(null));
+}
+
+pub fn lib_deinit() void {
+    std.debug.assert(instances.load(.acquire) != 0);
+    if (instances.fetchSub(1, .acq_rel) == 1)
+        c.libusb_exit(null);
+}
 
 pub fn call(ret: isize) USB_Error!isize {
     switch (ret) {
@@ -36,6 +51,9 @@ pub const DeviceIterator = struct {
     };
 
     pub fn init(filter: Filter) USB_Error!DeviceIterator {
+        try lib_init();
+        errdefer lib_deinit();
+
         var list: [*c]?*c.struct_libusb_device = undefined;
         const len: usize = @intCast(try call(c.libusb_get_device_list(null, &list)));
         errdefer c.libusb_free_device_list(list, 1);
@@ -49,6 +67,7 @@ pub const DeviceIterator = struct {
 
     pub fn deinit(self: *DeviceIterator) void {
         c.libusb_free_device_list(self.list, 1);
+        lib_deinit();
     }
 
     pub fn next(self: *DeviceIterator) USB_Error!?Device {

@@ -392,6 +392,9 @@ pub const CMSIS_DAP_Device = struct {
     packet_size: u32,
 
     pub fn init(device: ?*c.struct_libusb_device) !CMSIS_DAP_Device {
+        try libusb.lib_init();
+        errdefer libusb.lib_deinit();
+
         var maybe_config_descriptor: ?*c.struct_libusb_config_descriptor = undefined;
         _ = try libusb.call(c.libusb_get_active_config_descriptor(device, &maybe_config_descriptor));
         defer c.libusb_free_config_descriptor(maybe_config_descriptor);
@@ -452,11 +455,11 @@ pub const CMSIS_DAP_Device = struct {
         _ = try libusb.call(c.libusb_open(device, &handle));
         errdefer c.libusb_close(handle);
 
-        _ = try libusb.call(c.libusb_claim_interface(handle, interface_num));
-        errdefer _ = c.libusb_release_interface(handle, interface_num);
+        // _ = try libusb.call(c.libusb_claim_interface(handle, interface_num));
+        // errdefer _ = c.libusb_release_interface(handle, interface_num);
 
         // TODO: with this we get timeout on second program run
-        // _ = try libusb.call(c.libusb_set_interface_alt_setting(handle, alt_setting.bInterfaceNumber, alt_setting.bAlternateSetting));
+        // _ = try libusb.call(c.libusb_set_interface_alt_setting(handle, interface_num, alt_setting_num));
 
         var dev: CMSIS_DAP_Device = .{
             .handle = handle.?,
@@ -484,6 +487,7 @@ pub const CMSIS_DAP_Device = struct {
     pub fn deinit(dev: CMSIS_DAP_Device) void {
         _ = c.libusb_release_interface(dev.handle, dev.interface_num);
         c.libusb_close(dev.handle);
+        libusb.lib_deinit();
     }
 
     pub fn read(dev: CMSIS_DAP_Device, buf: []u8) libusb.USB_Error!usize {

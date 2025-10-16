@@ -6,10 +6,6 @@ pub const Target = @This();
 // choice. It may lead to more efficient code as the riscv debug module
 // supports core masks.
 
-// TODO:
-// - implement some sort of per core state
-// - implement locking mechanism for different parts (individual cores and memory)
-
 name: []const u8,
 endian: std.builtin.Endian,
 valid_cores: CoreMask,
@@ -210,6 +206,10 @@ pub const CoreMask = enum(u64) {
 
     pub fn is_selected(self: CoreMask, id: CoreId) bool {
         return @intFromEnum(self) & (@as(u64, 1) << @intFromEnum(id)) != 0;
+    }
+
+    pub fn contains_any(self: CoreMask, other: CoreMask) bool {
+        return @intFromEnum(self) & @intFromEnum(other) != 0;
     }
 
     pub fn contains_all(self: CoreMask, other: CoreMask) bool {
