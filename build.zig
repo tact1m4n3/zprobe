@@ -8,7 +8,6 @@ pub fn build(b: *std.Build) void {
     const libusb_dep = b.dependency("libusb", .{
         .target = target,
         .optimize = optimize,
-        .system_libudev = true,
     });
 
     const mod = b.addModule("zprobe", .{

@@ -5,11 +5,20 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "src/main.zig",
+        "LICENSE",
+        "README.md",
+        "src",
+        "tools",
     },
     .dependencies = .{
-        .libusb = .{ .path = "vendor/libusb" },
-        .microzig = .{ .path = "../microzig" }, // TODO: url
+        .libusb = .{
+            .url = "git+https://github.com/allyourcodebase/libusb#363c73885e5b04384bd4702605c613e67da45797",
+            .hash = "libusb-0.0.1-P02YQmeOFwBE3lScFnBmBaOrz-EKAMHX3r9YIDh7ZSul",
+        },
+        .microzig = .{
+            .url = "git+https://github.com/ZigEmbeddedGroup/microzig#50f31b340c5a65b8707e6fc0fb34cfc38f19be6d",
+            .hash = "microzig-0.15.0-D20YSWaRyQA5A7dpxS4dhYx3_8VhRuR0DOWDVY6KeiD3",
+        },
     },
     .fingerprint = 0xa0717333ace084a,
 }
