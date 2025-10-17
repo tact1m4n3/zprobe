@@ -17,8 +17,8 @@
             .hash = "libusb-0.0.1-P02YQmeOFwBE3lScFnBmBaOrz-EKAMHX3r9YIDh7ZSul",
         },
         .microzig = .{
-            .url = "git+https://github.com/ZigEmbeddedGroup/microzig#50f31b340c5a65b8707e6fc0fb34cfc38f19be6d",
-            .hash = "microzig-0.15.0-D20YSWaRyQA5A7dpxS4dhYx3_8VhRuR0DOWDVY6KeiD3",
+            .url = "git+https://github.com/ZigEmbeddedGroup/microzig.git#0.15.0",
+            .hash = "microzig-0.15.0-D20YSUedyQCadccU2P5U7LXRVMgZI5T0BxUcwTq1DfnR",
         },
         .clap = .{
             .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.11.0.tar.gz",
