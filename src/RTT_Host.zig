@@ -5,8 +5,6 @@ const Timeout = @import("Timeout.zig");
 
 const RTT_Host = @This();
 
-const SEGGER_RTT_ID: [16]u8 = "SEGGER RTT";
-
 name_pool: std.heap.ArenaAllocator,
 control_block_address: u64,
 header: Header,

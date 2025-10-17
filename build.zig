@@ -43,10 +43,7 @@ fn generate_flash_stubs_bundle(b: *std.Build) ?std.Build.LazyPath {
         .rp2xxx = true,
     }).init(b, mz_dep) orelse return null;
 
-    const cortex_m_cpu: microzig.Cpu = .{
-        .name = "cortex_m0plus",
-        .root_source_file = b.path("src/flash_stubs/cpus/cortex_m.zig"),
-    };
+    const cortex_m_cpu_path = b.path("src/flash_stubs/cpus/cortex_m.zig");
 
     const flash_loader_stubs: []const struct {
         name: []const u8,
@@ -58,7 +55,10 @@ fn generate_flash_stubs_bundle(b: *std.Build) ?std.Build.LazyPath {
             .file = "rp2xxx.zig",
             .target = mb.ports.rp2xxx.boards.raspberrypi.pico_flashless.derive(.{
                 .entry = .{ .symbol_name = "_start" },
-                .cpu = cortex_m_cpu,
+                .cpu = .{
+                    .name = "cortex_m0plus",
+                    .root_source_file = cortex_m_cpu_path,
+                },
             }),
         },
     };
