@@ -189,8 +189,9 @@ pub const Output = struct {
 
     pub fn load(output: Output, flasher: anytype, maybe_progress: ?*Progress) !void {
         if (maybe_progress) |progress| {
-            try progress.update(0, output.addrs.len);
+            try progress.step("Flashing", 0, output.addrs.len);
         }
+        defer if (maybe_progress) |progress| progress.step_reset();
 
         try flasher.begin();
 
@@ -198,7 +199,7 @@ pub const Output = struct {
             try flasher.load(addr, output.data[i * output.chunk_size ..][0..output.chunk_size]);
 
             if (maybe_progress) |progress| {
-                try progress.update(i + 1, output.addrs.len);
+                try progress.step("Flashing", i + 1, output.addrs.len);
             }
         }
 

@@ -15,8 +15,6 @@ buf: []u8,
 
 adi: ARM_DebugInterface,
 
-// TODO: implement read/write repeated functions
-
 pub fn create(allocator: std.mem.Allocator, filter: libusb.DeviceIterator.Filter) !*CMSIS_DAP {
     var device_it: libusb.DeviceIterator = try libusb.DeviceIterator.init(filter);
     defer device_it.deinit();

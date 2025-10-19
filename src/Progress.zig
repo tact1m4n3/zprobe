@@ -17,7 +17,7 @@ pub const Config = struct {
         .error_symbol = 'E',
         .spinner_symbols = &.{ '|', '/', '-', '\\' },
         .bar_start_symbol = '|',
-        .bar_fill_symbols = &.{ '#' },
+        .bar_fill_symbols = &.{'#'},
         .bar_end_symbol = '|',
     };
 
@@ -49,12 +49,12 @@ pub const Config = struct {
 
 const Task = struct {
     text: []const u8,
+    step_name: ?[]const u8 = null,
     total_steps: usize = 0,
     completed_steps: usize = 0,
 };
 
 pub fn init(writer: *std.Io.Writer, config: Config) !Progress {
-    try ansi_term.hide_cursor(writer);
     return .{
         .writer = writer,
         .config = config,
@@ -62,10 +62,10 @@ pub fn init(writer: *std.Io.Writer, config: Config) !Progress {
 }
 
 pub fn deinit(progress: *Progress) void {
-    progress.stop() catch {};
+    progress.end() catch {};
 }
 
-pub fn stop(progress: *Progress) !void {
+pub fn end(progress: *Progress) !void {
     if (progress.thread) |thread| {
         {
             progress.mutex.lock();
@@ -75,15 +75,19 @@ pub fn stop(progress: *Progress) !void {
         progress.cond.signal();
         thread.join();
         progress.thread = null;
+        progress.thread_should_exit = false;
     }
+
+    progress.task = null;
+    try ansi_term.clear_line(progress.writer);
+    try ansi_term.set_cursor_column(progress.writer, 0);
     try ansi_term.show_cursor(progress.writer);
     try progress.writer.flush();
 }
 
-pub fn begin(progress: *Progress, text: []const u8) !void {
-    std.debug.assert(progress.task == null);
-
+pub fn update(progress: *Progress, text: []const u8) !void {
     if (progress.thread == null) {
+        try ansi_term.hide_cursor(progress.writer);
         progress.thread = try .spawn(.{
             .stack_size = 16 * 1024,
         }, update_thread, .{progress});
@@ -101,45 +105,63 @@ pub fn begin(progress: *Progress, text: []const u8) !void {
     progress.cond.signal();
 }
 
-pub fn update(progress: *Progress, completed_steps: usize, total_steps: usize) !void {
+pub fn reset(progress: *Progress) void {
+    progress.mutex.lock();
+    defer progress.mutex.unlock();
+    progress.task = null;
+    try ansi_term.clear_line(progress.writer);
+    try ansi_term.set_cursor_column(progress.writer, 0);
+    try progress.writer.flush();
+}
+
+pub fn step(progress: *Progress, step_name: []const u8, completed_steps: usize, total_steps: usize) !void {
     progress.mutex.lock();
     defer progress.mutex.unlock();
 
     if (progress.task) |*task| {
+        task.step_name = step_name;
         task.completed_steps = completed_steps;
         task.total_steps = total_steps;
         try render(progress, task.*);
-    } else {
-        return error.NoTaskStarted;
     }
 }
 
-pub const FinishStatus = enum {
-    success,
-    fail,
-};
-
-pub fn end(progress: *Progress, status: FinishStatus) !void {
+pub fn step_reset(progress: *Progress) void {
     progress.mutex.lock();
     defer progress.mutex.unlock();
 
-    const task = progress.task orelse return error.NoTaskStarted;
-    progress.task = null;
-
-    try ansi_term.clear_line(progress.writer);
-    try ansi_term.set_cursor_column(progress.writer, 0);
-    try progress.writer.print("{s} ", .{task.text});
-    switch (status) {
-        .success => if (progress.config.success_symbol) |success_symbol|
-            try write_symbol(progress.writer, success_symbol, 1, progress.config.success_color),
-        .fail => try write_symbol(progress.writer, progress.config.error_symbol, 1, progress.config.error_color),
+    if (progress.task) |*task| {
+        task.step_name = null;
+        task.completed_steps = 0;
+        task.total_steps = 0;
+        render(progress, task.*) catch {};
     }
-    try progress.writer.writeByte('\n');
-    try progress.writer.flush();
 }
 
-pub fn fail(progress: *Progress) void {
-    progress.end(.fail) catch {};
+pub fn fail(progress: *Progress, err: anyerror) void {
+    fail_impl(progress, err) catch {};
+}
+
+fn fail_impl(progress: *Progress, err: anyerror) !void {
+    progress.mutex.lock();
+    defer progress.mutex.unlock();
+
+    if (progress.task) |task| {
+        try ansi_term.clear_line(progress.writer);
+        try ansi_term.set_cursor_column(progress.writer, 0);
+        try progress.writer.print("{s} ", .{task.text});
+        try ansi_term.write_color(progress.writer, .red);
+        try progress.writer.writeAll("FAILED ");
+        try ansi_term.reset_color(progress.writer);
+        try progress.writer.print("with error.{t}\n", .{err});
+    } else {
+        try ansi_term.write_color(progress.writer, .red);
+        try progress.writer.print("Unexpected crash with error.{t}\n", .{err});
+        try ansi_term.reset_color(progress.writer);
+    }
+    try progress.writer.flush();
+
+    progress.task = null;
 }
 
 fn render(progress: *Progress, task: Task) !void {
@@ -147,6 +169,10 @@ fn render(progress: *Progress, task: Task) !void {
     try ansi_term.set_cursor_column(progress.writer, 0);
     try write_symbol(progress.writer, progress.config.spinner_symbols[progress.symbol_index], 1, progress.config.spinner_color);
     try progress.writer.print(" {s}", .{task.text});
+
+    if (task.step_name) |step_name| {
+        try progress.writer.print(" > {s}", .{step_name});
+    }
 
     if (task.total_steps != 0) {
         const bar_width = 40;
@@ -187,10 +213,10 @@ fn update_thread(progress: *Progress) void {
             }
         }
 
-        if (progress.thread_should_exit) return;
-
         var timer = std.time.Timer.start() catch unreachable;
         while (true) {
+            if (progress.thread_should_exit) return;
+
             while (true) {
                 if (timer.read() > increment_interval) {
                     break;
@@ -251,32 +277,32 @@ pub const ansi_term = struct {
         rgb: RGB,
     };
 
-    const esc = "\x1B";
-    const csi = esc ++ "[";
-    const reset = csi ++ "0m";
+    const esc_seq = "\x1B";
+    const csi_seq = esc_seq ++ "[";
+    const reset_seq = csi_seq ++ "0m";
 
     pub fn clear_line(writer: *std.Io.Writer) !void {
-        try writer.writeAll(csi ++ "2K");
+        try writer.writeAll(csi_seq ++ "2K");
     }
 
     pub fn hide_cursor(writer: *std.Io.Writer) !void {
-        try writer.writeAll(csi ++ "?25l");
+        try writer.writeAll(csi_seq ++ "?25l");
     }
 
     pub fn show_cursor(writer: *std.Io.Writer) !void {
-        try writer.writeAll(csi ++ "?25h");
+        try writer.writeAll(csi_seq ++ "?25h");
     }
 
     pub fn set_cursor_column(writer: *std.Io.Writer, column: usize) !void {
-        try writer.print(csi ++ "{d}G", .{column});
+        try writer.print(csi_seq ++ "{d}G", .{column});
     }
 
     pub fn cursor_forward(writer: *std.Io.Writer, columns: usize) !void {
-        try writer.print(csi ++ "{d}C", .{columns});
+        try writer.print(csi_seq ++ "{d}C", .{columns});
     }
 
     pub fn write_color(writer: *std.Io.Writer, color: Color) !void {
-        try writer.writeAll(csi);
+        try writer.writeAll(csi_seq);
         _ = switch (color) {
             .default => try writer.writeAll("39"),
             .black => try writer.writeAll("30"),
@@ -295,7 +321,7 @@ pub const ansi_term = struct {
     }
 
     pub fn reset_color(writer: *std.Io.Writer) !void {
-        try writer.writeAll(reset);
+        try writer.writeAll(reset_seq);
     }
 };
 

@@ -54,8 +54,7 @@ pub fn arm_debug_interface(probe: Probe) ?*ARM_DebugInterface {
     return probe.vtable.arm_debug_interface(probe.ptr);
 }
 
-pub fn default_arm_debug_interface(ptr: *anyopaque) ?*ARM_DebugInterface {
-    _ = ptr;
+pub fn default_arm_debug_interface(_: *anyopaque) ?*ARM_DebugInterface {
     return null;
 }
 

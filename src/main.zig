@@ -6,7 +6,7 @@ pub const std_options: std.Options = .{
     .log_level = .err,
 };
 
-pub fn main() !void {
+pub fn main() !u8 {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer _ = debug_allocator.deinit();
     const allocator = switch (builtin.mode) {
@@ -21,12 +21,37 @@ pub fn main() !void {
         return error.Usage;
     }
 
-    const stdout = std.fs.File.stdout();
-    var stdout_writer_buf: [128]u8 = undefined;
-    var stdout_writer = stdout.writer(&stdout_writer_buf);
+    const stderr = std.fs.File.stderr();
+    var stderr_writer_buf: [128]u8 = undefined;
+    var stderr_writer = stderr.writer(&stderr_writer_buf);
 
-    const elf_path = args[1];
-    const elf_file = try std.fs.cwd().openFile(elf_path, .{});
+    var progress: zprobe.Progress = try .init(&stderr_writer.interface, .elegant);
+    defer progress.deinit();
+
+    // TODO: proper args parsing
+    main_impl(allocator, &progress, .{
+        .elf_path = args[1],
+    }) catch |err| {
+        progress.fail(err);
+        if (@errorReturnTrace()) |trace| {
+            std.debug.dumpStackTrace(trace.*);
+        }
+        return 1;
+    };
+
+    return 0;
+}
+
+pub const Args = struct {
+    elf_path: []const u8,
+};
+
+fn main_impl(
+    allocator: std.mem.Allocator,
+    progress: *zprobe.Progress,
+    args: Args,
+) !void {
+    const elf_file = try std.fs.cwd().openFile(args.elf_path, .{});
     defer elf_file.close();
 
     var elf_file_reader_buf: [4096]u8 = undefined;
@@ -34,63 +59,74 @@ pub fn main() !void {
     var elf_info: zprobe.elf.Info = try .init(allocator, &elf_file_reader);
     defer elf_info.deinit(allocator);
 
-    var progress: zprobe.Progress = try .init(&stdout_writer.interface, .elegant);
-    defer progress.deinit();
-
-    try progress.begin("Connecting to probe");
-    var probe = zprobe.Probe.create(allocator, .{}) catch |err| {
-        switch (err) {
-            error.NoProbeFound => progress.fail(),
-            else => progress.fail(),
-        }
-        return err;
-    };
+    try progress.update("Connecting to probe");
+    var probe: zprobe.Probe = try .create(allocator, .{});
     defer probe.destroy();
-    probe.attach(.mhz(1)) catch |err| {
-        progress.fail();
-        return err;
-    };
+
+    try probe.attach(.mhz(1));
     defer probe.detach();
-    try progress.end(.success);
 
-    try progress.begin("Initializing and resetting target");
-    var rp2040 = zprobe.targets.RP2040.init(probe) catch |err| {
-        progress.fail();
-        return err;
-    };
+    try progress.update("Initializing target");
+    var rp2040: zprobe.targets.RP2040 = try .init(probe);
     defer rp2040.deinit();
-    rp2040.target.system_reset() catch |err| {
-        progress.fail();
-        return err;
-    };
-    try progress.end(.success);
 
-    try progress.begin("Flashing");
-    zprobe.flash.load_elf(allocator, &rp2040.target, elf_info, &elf_file_reader, &progress) catch |err| {
-        progress.fail();
-        return err;
-    };
-    try progress.end(.success);
+    try progress.update("Running system reset");
+    try rp2040.target.system_reset();
 
+    try progress.update("Loading firmware");
+    try zprobe.flash.load_elf(allocator, &rp2040.target, elf_info, &elf_file_reader, progress);
+
+    try progress.update("Resetting");
     try rp2040.target.reset(.all);
 
-    try progress.begin("Starting RTT host");
-    var rtt_host = zprobe.RTT_Host.init(allocator, &rp2040.target, .{
-        .elf_file_reader = &elf_file_reader,
-        .elf_info = elf_info,
-    }, null) catch |err| {
-        progress.fail();
-        return err;
-    };
+    try progress.update("Initializing RTT host");
+    var rtt_host: zprobe.RTT_Host = try .init(allocator, &rp2040.target, .{
+        .location_hint = .{
+            .blind = .{ .first_n_kilobytes = 100 },
+        },
+    }, null);
     defer rtt_host.deinit(allocator);
-    try progress.end(.success);
 
-    try progress.stop();
+    try progress.end();
+
+    const stdout = std.fs.File.stdout();
+    var stdout_writer = stdout.writer(&.{});
 
     var buf: [1024]u8 = undefined;
     while (true) {
         const n = try rtt_host.read(&rp2040.target, 0, &buf);
-        try stdout.writeAll(buf[0..n]);
+        try stdout_writer.interface.writeAll(buf[0..n]);
         std.Thread.sleep(1 * std.time.ns_per_ms);
     }
 }
+
+// pub fn set_ctrl_c_handler(comptime handler: *const fn () void) error{Unexpected}!void {
+//     if (builtin.os.tag == .windows) {
+//         const windows = std.os.windows;
+//         const handler_routine = struct {
+//             fn handler_routine(dwCtrlType: windows.DWORD) callconv(windows.WINAPI) windows.BOOL {
+//                 if (dwCtrlType == windows.CTRL_C_EVENT) {
+//                     handler();
+//                     return windows.TRUE;
+//                 } else {
+//                     // Ignore this event.
+//                     return windows.FALSE;
+//                 }
+//             }
+//         }.handler_routine;
+//         try windows.SetConsoleCtrlHandler(handler_routine, true);
+//     } else {
+//         const internal_handler = struct {
+//             fn internal_handler(sig: c_int) callconv(.c) void {
+//                 std.debug.assert(sig == std.posix.SIG.INT);
+//                 handler();
+//             }
+//         }.internal_handler;
+//         const act = std.posix.Sigaction{
+//             .handler = .{ .handler = internal_handler },
+//             .mask = std.posix.sigemptyset(),
+//             .flags = 0,
+//         };
+//         std.posix.sigaction(std.posix.SIG.INT, &act, null);
+//     }
+// }

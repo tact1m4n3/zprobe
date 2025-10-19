@@ -1,7 +1,9 @@
 const std = @import("std");
-const Target = @import("Target.zig");
-const elf = @import("elf.zig");
+
 const Timeout = @import("Timeout.zig");
+const Progress = @import("Progress.zig");
+const elf = @import("elf.zig");
+const Target = @import("Target.zig");
 
 const RTT_Host = @This();
 
@@ -11,35 +13,53 @@ header: Header,
 up_channels: std.StringHashMapUnmanaged(usize),
 down_channels: std.StringHashMapUnmanaged(usize),
 
-pub const InitOptions = struct {
-    elf_file_reader: *std.fs.File.Reader,
-    elf_info: elf.Info,
-    location_hint: BlockLocationHint = .auto,
+pub const BlockLocationHint = union(enum) {
+    /// Scan either a given region or the first n bytes in all RAM memory regions
+    blind: Blind,
+    /// More efficient lookup using info provided by an ELF
+    with_elf: With_ELF,
 
-    pub const BlockLocationHint = union(enum) {
-        auto,
-        section_name: []const u8,
-        symbol_name: []const u8,
+    pub const Blind = union(enum) {
+        region: SearchRegion,
+        first_n_kilobytes: u64,
 
         pub const SearchRegion = struct {
             start: u64,
             size: u64,
         };
     };
+
+    pub const With_ELF = struct {
+        elf_file_reader: *std.fs.File.Reader,
+        elf_info: elf.Info,
+        method: Method = .auto,
+
+        pub const Method = union(enum) {
+            auto,
+            section_name: []const u8,
+            symbol_name: []const u8,
+        };
+    };
+};
+
+pub const InitOptions = struct {
+    location_hint: BlockLocationHint = .{ .blind = .{ .first_n_kilobytes = 4 } },
+    timeout_ns: ?u64 = std.time.ns_per_s,
 };
 
 pub fn init(
     allocator: std.mem.Allocator,
     target: *Target,
     options: InitOptions,
-    timeout_ns: ?u64,
+    maybe_progress: ?*Progress,
 ) !RTT_Host {
     const timeout: Timeout = try .init(.{
-        .after = timeout_ns,
+        .after = options.timeout_ns,
     });
 
     const result = loop: while (true) {
-        if (try find_control_block(target, options)) |result| break :loop result;
+        if (try find_control_block(allocator, target, options.location_hint, maybe_progress)) |result|
+            break :loop result;
         try timeout.tick();
     } else return error.MissingControlBlock;
 
@@ -148,32 +168,63 @@ const ControlBlockFindResult = struct {
     header: Header,
 };
 
-fn find_control_block(target: *Target, options: InitOptions) !?ControlBlockFindResult {
-    switch (options.location_hint) {
-        .auto => for (options.elf_info.load_segments.items) |seg| {
-            if ((try find_control_block_in_range(target, seg.virtual_address, seg.memory_size))) |result| {
-                return result;
-            }
-        } else return null,
-        .section_name => |name| {
-            const section = options.elf_info.sections.get(name) orelse return null;
-            return find_control_block_in_range(target, section.address, section.size);
+fn find_control_block(
+    allocator: std.mem.Allocator,
+    target: *Target,
+    location_hint: BlockLocationHint,
+    maybe_progress: ?*Progress,
+) !?ControlBlockFindResult {
+    switch (location_hint) {
+        .blind => |blind_hint| switch (blind_hint) {
+            .region => |region| return try find_control_block_in_range(allocator, target, region.start, region.size, maybe_progress),
+            .first_n_kilobytes => |n| for (target.memory_map) |region| {
+                if ((try find_control_block_in_range(allocator, target, region.offset, @min(n * 1024, region.length), maybe_progress))) |result| {
+                    return result;
+                }
+            } else return null,
         },
-        .symbol_name => |name| {
-            const symbol = (try elf.get_symbol(options.elf_file_reader, options.elf_info, name)) orelse return null;
-            return find_control_block_in_range(target, symbol.st_value, symbol.st_size);
+        .with_elf => |with_elf_hint| switch (with_elf_hint.method) {
+            .auto => for (with_elf_hint.elf_info.load_segments.items) |seg| {
+                if ((try find_control_block_in_range(allocator, target, seg.virtual_address, seg.memory_size, maybe_progress))) |result| {
+                    return result;
+                }
+            } else return null,
+            .section_name => |name| {
+                const section = with_elf_hint.elf_info.sections.get(name) orelse return null;
+                return find_control_block_in_range(allocator, target, section.address, section.size, maybe_progress);
+            },
+            .symbol_name => |name| {
+                const symbol = (try elf.get_symbol(with_elf_hint.elf_file_reader, with_elf_hint.elf_info, name)) orelse return null;
+                return find_control_block_in_range(allocator, target, symbol.st_value, symbol.st_size, maybe_progress);
+            },
         },
     }
 }
 
 // TODO: maybe use memory reader
-fn find_control_block_in_range(target: *Target, start: u64, size: u64) !?ControlBlockFindResult {
+fn find_control_block_in_range(
+    allocator: std.mem.Allocator,
+    target: *Target,
+    start: u64,
+    size: u64,
+    maybe_progress: ?*Progress,
+) !?ControlBlockFindResult {
     const chunk_size = 1024;
     const extra_size = @sizeOf(Header);
     var buf: [chunk_size + extra_size]u8 = @splat(0);
     var offset: u64 = 0;
 
+    // NOTE: we could also statically allocate this
+    const step_name = try std.fmt.allocPrint(allocator, "Scanning 0x{x:>8} - 0x{x:>8}", .{ start, start + size });
+    defer allocator.free(step_name);
+
+    defer if (maybe_progress) |progress| progress.step_reset();
+
     while (offset < size) : (offset += chunk_size) {
+        if (maybe_progress) |progress| {
+            try progress.step(step_name, offset, size);
+        }
+
         @memcpy(buf[0..extra_size], buf[chunk_size..]); // can't overlap
 
         try target.read_memory(start + offset, buf[extra_size..]);
