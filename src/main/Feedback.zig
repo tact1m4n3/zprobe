@@ -222,6 +222,8 @@ fn render(feedback: *Feedback, task: Task) !void {
             try write_symbol(feedback.writer, feedback.config.bar_empty_symbol orelse ' ', bar_width - full_blocks - 1, feedback.config.bar_color);
             try write_symbol(feedback.writer, feedback.config.bar_end_symbol, 1, feedback.config.bar_color);
         }
+
+        try feedback.writer.print(" [{}/{}]", .{ task.completed, task.total });
     }
 
     try feedback.writer.flush();

@@ -18,7 +18,7 @@ pub fn load_elf(
     defer loader.deinit(allocator);
     try loader.add_elf(allocator, elf_file_reader, elf_info, target.memory_map);
 
-    const output = try loader.bake(allocator, stub_flasher.page_size, stub_flasher.page_size);
+    const output = try loader.bake(allocator, stub_flasher.page_size, stub_flasher.ideal_transfer_size);
     defer output.deinit(allocator);
 
     try output.load(stub_flasher, maybe_progress);
@@ -82,7 +82,7 @@ pub const Loader = struct {
         std.mem.sort(Segment, loader.segments.items, {}, Segment.is_less);
     }
 
-    pub fn bake(loader: Loader, allocator: std.mem.Allocator, chunk_size: u64, page_size: u64) !Output {
+    pub fn bake(loader: Loader, allocator: std.mem.Allocator, page_size: u64, chunk_size: u64) !Output {
         var data: std.Io.Writer.Allocating = .init(allocator);
         defer data.deinit();
 
@@ -222,14 +222,16 @@ pub const StubFlasher = struct {
     image_header: ImageHeader64,
     image_base: u64,
     page_size: u64,
-    chunk_data_addr: u64,
-    max_chunk_size: u64,
+    ideal_transfer_size: u64,
+    max_transfer_size: u64,
+    data_addr: u64,
 
     pub const ImageHeader32 = extern struct {
         pub const MAGIC = 0xBAD_C0FFE;
 
         magic: u64,
         page_size: u32,
+        ideal_transfer_size: u32,
         stack_pointer_offset: u32,
         return_address_offset: u32,
         begin_fn_offset: u32,
@@ -239,10 +241,11 @@ pub const StubFlasher = struct {
     };
 
     pub const ImageHeader64 = extern struct {
-        pub const MAGIC = 0xAAAAAAAA_BAD_C0FFE;
+        pub const MAGIC = 0xBAD_BAD_BAD_C00FFE;
 
         magic: u64,
         page_size: u64,
+        ideal_transfer_size: u64,
         stack_pointer_offset: u64,
         return_address_offset: u64,
         begin_fn_offset: u64,
@@ -270,6 +273,7 @@ pub const StubFlasher = struct {
                 break :blk .{ .@"32bit", .{
                     .magic = image_header_32.magic,
                     .page_size = image_header_32.page_size,
+                    .ideal_transfer_size = image_header_32.ideal_transfer_size,
                     .stack_pointer_offset = image_header_32.stack_pointer_offset,
                     .return_address_offset = image_header_32.return_address_offset,
                     .begin_fn_offset = image_header_32.begin_fn_offset,
@@ -291,25 +295,26 @@ pub const StubFlasher = struct {
 
         const image_base = load_region.offset;
 
-        // Calculate where should chunk data start
-        const chunk_data_addr = std.mem.alignForward(
+        // Calculate where should transfer data start
+        const transfer_data_addr = std.mem.alignForward(
             u64,
             load_region.offset + stub.len,
             image_header.page_size,
         );
 
-        if (format == .@"32bit" and chunk_data_addr > std.math.maxInt(u32))
+        if (format == .@"32bit" and transfer_data_addr > std.math.maxInt(u32))
             return error.NotSupported;
 
         // Calculate how much space is there for chunk data
-        const max_chunk_size = std.mem.alignBackward(
+        const max_transfer_size = std.mem.alignBackward(
             u64,
             load_region.offset + load_region.length,
             image_header.page_size,
-        ) - chunk_data_addr;
+        ) - transfer_data_addr;
 
-        // If we don't have enough space for one page, return error
-        if (max_chunk_size < image_header.page_size) {
+        // If we don't have enough space for the ideal transfer size, return
+        // error
+        if (max_transfer_size < image_header.ideal_transfer_size) {
             return error.MemoryBufferTooSmall;
         }
 
@@ -320,8 +325,9 @@ pub const StubFlasher = struct {
             .image_header = image_header,
             .image_base = image_base,
             .page_size = image_header.page_size,
-            .chunk_data_addr = chunk_data_addr,
-            .max_chunk_size = max_chunk_size,
+            .ideal_transfer_size = image_header.ideal_transfer_size,
+            .max_transfer_size = max_transfer_size,
+            .data_addr = transfer_data_addr,
         };
     }
 
@@ -338,7 +344,7 @@ pub const StubFlasher = struct {
         try flasher.target.write_register(.boot, .stack_pointer, flasher.image_base + flasher.image_header.stack_pointer_offset);
         try flasher.target.run(.boot);
 
-        // waited later
+        // awaited later
     }
 
     pub fn end(flasher: StubFlasher) !void {
@@ -347,26 +353,26 @@ pub const StubFlasher = struct {
 
     // TODO: maybe refactor calls to stub function
     /// Verifies flash content.
-    pub fn verify(flasher: StubFlasher, addr: u64, chunk: []const u8) !bool {
+    pub fn verify(flasher: StubFlasher, addr: u64, data: []const u8) !bool {
         std.debug.assert(std.mem.isAligned(addr, flasher.page_size));
-        std.debug.assert(std.mem.isAligned(chunk.len, flasher.page_size));
-        std.debug.assert(chunk.len <= flasher.max_chunk_size);
+        std.debug.assert(std.mem.isAligned(data.len, flasher.page_size));
+        std.debug.assert(data.len <= flasher.max_transfer_size);
 
         try flasher.wait();
 
         // If the stub is 32 bit, we don't support 64 bit addresses
         if (flasher.format == .@"32bit") {
             if (addr > std.math.maxInt(u32)) return error.NotSupported;
-            if (chunk.len > std.math.maxInt(u32)) return error.NotSupported;
+            if (data.len > std.math.maxInt(u32)) return error.NotSupported;
         }
 
         // Load chunk into memory
-        try flasher.target.write_memory(flasher.chunk_data_addr, chunk);
+        try flasher.target.write_memory(flasher.data_addr, data);
 
         // Verify that the flash doesn't already contain the same data
         try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
-        try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.chunk_data_addr);
-        try flasher.target.write_register(.boot, .{ .arg = 2 }, chunk.len);
+        try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.data_addr);
+        try flasher.target.write_register(.boot, .{ .arg = 2 }, data.len);
         try flasher.target.write_register(.boot, .return_address, flasher.image_base + flasher.image_header.return_address_offset);
         try flasher.target.write_register(.boot, .instruction_pointer, flasher.image_base + flasher.image_header.verify_fn_offset);
         try flasher.target.write_register(.boot, .stack_pointer, flasher.image_base + flasher.image_header.stack_pointer_offset);
@@ -377,30 +383,31 @@ pub const StubFlasher = struct {
     }
 
     // TODO: maybe refactor calls to stub function
-    /// Erase and then program flash chunk with data. Address must be aligned
-    /// to image_header.page_size and data.len must equal chunk_size.
-    pub fn load(flasher: StubFlasher, addr: u64, chunk: []const u8) !void {
+    /// Erase and then program flash. Address must be aligned to page_size and
+    /// data.len must be a multiple of page_size and less then or equal to the
+    /// max_transfer_size.
+    pub fn load(flasher: StubFlasher, addr: u64, data: []const u8) !void {
         std.debug.assert(std.mem.isAligned(addr, flasher.page_size));
-        std.debug.assert(std.mem.isAligned(chunk.len, flasher.page_size));
-        std.debug.assert(chunk.len <= flasher.max_chunk_size);
+        std.debug.assert(std.mem.isAligned(data.len, flasher.page_size));
+        std.debug.assert(data.len <= flasher.max_transfer_size);
 
         // If the stub is 32 bit, we don't support 64 bit addresses
         if (flasher.format == .@"32bit") {
             if (addr > std.math.maxInt(u32)) return error.NotSupported;
-            if (chunk.len > std.math.maxInt(u32)) return error.NotSupported;
+            if (data.len > std.math.maxInt(u32)) return error.NotSupported;
         }
 
         try flasher.wait();
 
-        std.log.debug("program: addr 0x{x:0>8} length 0x{x:0>8}", .{ addr, chunk.len });
+        std.log.debug("program: addr 0x{x:0>8} length 0x{x:0>8}", .{ addr, data.len });
 
         // Load chunk into memory
-        try flasher.target.write_memory(flasher.chunk_data_addr, chunk);
+        try flasher.target.write_memory(flasher.data_addr, data);
 
         // Verify that the flash doesn't already contain the same data
         try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
-        try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.chunk_data_addr);
-        try flasher.target.write_register(.boot, .{ .arg = 2 }, chunk.len);
+        try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.data_addr);
+        try flasher.target.write_register(.boot, .{ .arg = 2 }, data.len);
         try flasher.target.write_register(.boot, .return_address, flasher.image_base + flasher.image_header.return_address_offset);
         try flasher.target.write_register(.boot, .instruction_pointer, flasher.image_base + flasher.image_header.verify_fn_offset);
         try flasher.target.write_register(.boot, .stack_pointer, flasher.image_base + flasher.image_header.stack_pointer_offset);
@@ -415,7 +422,7 @@ pub const StubFlasher = struct {
 
         // Erase chunk
         try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
-        try flasher.target.write_register(.boot, .{ .arg = 1 }, chunk.len);
+        try flasher.target.write_register(.boot, .{ .arg = 1 }, data.len);
         try flasher.target.write_register(.boot, .return_address, flasher.image_base + flasher.image_header.return_address_offset);
         try flasher.target.write_register(.boot, .instruction_pointer, flasher.image_base + flasher.image_header.erase_fn_offset);
         try flasher.target.write_register(.boot, .stack_pointer, flasher.image_base + flasher.image_header.stack_pointer_offset);
@@ -424,19 +431,19 @@ pub const StubFlasher = struct {
 
         // Program chunk
         try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
-        try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.chunk_data_addr);
-        try flasher.target.write_register(.boot, .{ .arg = 2 }, chunk.len);
+        try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.data_addr);
+        try flasher.target.write_register(.boot, .{ .arg = 2 }, data.len);
         try flasher.target.write_register(.boot, .return_address, flasher.image_base + flasher.image_header.return_address_offset);
         try flasher.target.write_register(.boot, .instruction_pointer, flasher.image_base + flasher.image_header.program_fn_offset);
         try flasher.target.write_register(.boot, .stack_pointer, flasher.image_base + flasher.image_header.stack_pointer_offset);
         try flasher.target.run(.boot);
         // try flasher.wait();
+        // awaited later
     }
 
     fn wait(flasher: StubFlasher) !void {
         var timeout: Timeout = try .init(.{
             .after = 5 * std.time.ns_per_s,
-            .sleep_per_tick_ns = 100 * std.time.ns_per_ms,
         });
         while (!try flasher.target.is_halted(.boot)) {
             try timeout.tick();
@@ -466,7 +473,7 @@ pub const StubFlasher = struct {
 
 pub const DebugFlasher = struct {
     page_size: u32 = 4096,
-    max_chunk_size: u32 = 4096,
+    ideal_transfer_size: u32 = 4096,
 
     pub fn begin(_: DebugFlasher) !void {}
     pub fn end(_: DebugFlasher) !void {}

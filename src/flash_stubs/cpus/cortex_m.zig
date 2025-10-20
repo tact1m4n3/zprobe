@@ -22,16 +22,18 @@ pub const interrupt = struct {
 // chip independent
 // TODO: have different version for 64 bit, if we should support this
 pub const ImageHeader = extern struct {
-    const MAGIC = 0xBAD_C0FFE;
+    const MAGIC_32 = 0xBAD_C0FFE;
+    const MAGIC_64 = 0xBAD_BAD_BAD_C00FFE;
 
-    magic: u64 = MAGIC,
-    page_size: u32,
+    magic: u64,
+    page_size: usize,
+    ideal_transfer_size: usize,
     stack_pointer: *const anyopaque,
     return_address: *const fn () callconv(.naked) noreturn = return_address,
     begin: *const fn () callconv(.c) void,
-    verify: *const fn (addr: u32, data: [*]const u8, count: u32) callconv(.c) bool,
-    erase: *const fn (addr: u32, count: u32) callconv(.c) void,
-    program: *const fn (addr: u32, data: [*]const u8, count: u32) callconv(.c) void,
+    verify: *const fn (addr: usize, data: [*]const u8, count: usize) callconv(.c) bool,
+    erase: *const fn (addr: usize, count: usize) callconv(.c) void,
+    program: *const fn (addr: usize, data: [*]const u8, count: usize) callconv(.c) void,
 };
 
 // chip independent
@@ -43,7 +45,7 @@ pub fn return_address() callconv(.naked) noreturn {
 pub fn default_begin() callconv(.c) void {}
 
 // chip independent
-pub fn default_verify(addr: u32, data: [*]const u8, count: u32) callconv(.c) bool {
+pub fn default_verify(addr: usize, data: [*]const u8, count: usize) callconv(.c) bool {
     const flash_data: []const u8 = @as([*]const u8, @ptrFromInt(addr))[0..count];
     return std.mem.eql(u8, flash_data, data[0..count]);
 }
@@ -54,7 +56,12 @@ pub const startup_logic = struct {
     }
 
     pub var image_header: ImageHeader = .{
+        .magic = ImageHeader.MAGIC_32,
         .page_size = microzig.app.page_size,
+        .ideal_transfer_size = if (@hasDecl(microzig.app, "ideal_transfer_size"))
+            microzig.app.ideal_transfer_size
+        else
+            microzig.app.page_size,
         .stack_pointer = microzig.utilities.get_end_of_stack(),
         .begin = if (@hasDecl(microzig.app, "begin")) microzig.app.begin else default_begin,
         .verify = if (@hasDecl(microzig.app, "verify")) microzig.app.verify else default_verify,

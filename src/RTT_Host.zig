@@ -210,15 +210,14 @@ fn find_control_block_in_range(
     timeout: Timeout,
     maybe_progress: ?Progress,
 ) !?ControlBlockFindResult {
-    _ = allocator; // autofix
     const chunk_size = 1024;
     const extra_size = @sizeOf(Header);
     var buf: [chunk_size + extra_size]u8 = @splat(0);
     var offset: u64 = 0;
 
     // NOTE: we could also statically allocate this
-    // const step_name = try std.fmt.allocPrint(allocator, "Scanning 0x{x:>8} - 0x{x:>8}", .{ start, start + size });
-    // defer allocator.free(step_name);
+    const step_name = try std.fmt.allocPrint(allocator, "Scanning 0x{x:>8} - 0x{x:>8}", .{ start, start + size });
+    defer allocator.free(step_name);
 
     defer if (maybe_progress) |progress| progress.end();
 
@@ -227,7 +226,7 @@ fn find_control_block_in_range(
 
         if (maybe_progress) |progress| {
             try progress.step(.{
-                .name = "Scanning",
+                .name = step_name,
                 .completed = offset,
                 .total = size,
             });

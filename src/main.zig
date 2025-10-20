@@ -69,7 +69,7 @@ fn main_impl(
     var probe: zprobe.Probe = try .create(allocator, .{});
     defer probe.destroy();
 
-    try probe.attach(.mhz(1));
+    try probe.attach(.mhz(10));
     defer probe.detach();
 
     try feedback.update("Initializing target");
