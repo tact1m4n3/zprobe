@@ -56,6 +56,7 @@ fn main_impl(
     feedback: *Feedback,
     args: Args,
 ) !void {
+    try feedback.update("Reading ELF");
     const elf_file = try std.fs.cwd().openFile(args.elf_path, .{});
     defer elf_file.close();
 
@@ -86,9 +87,6 @@ fn main_impl(
 
     try feedback.update("Initializing RTT host");
     var rtt_host: zprobe.RTT_Host = try .init(allocator, &rp2040.target, .{
-        .location_hint = .{
-            .blind = .{ .first_n_kilobytes = 1 },
-        },
         .progress = feedback.progress(),
     });
     defer rtt_host.deinit(allocator);
