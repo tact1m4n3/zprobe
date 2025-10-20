@@ -10,7 +10,7 @@ pub fn load_elf(
     target: *Target,
     elf_info: elf.Info,
     elf_file_reader: *std.fs.File.Reader,
-    maybe_progress: ?*Progress,
+    maybe_progress: ?Progress,
 ) !void {
     const stub_flasher: StubFlasher = try .init(target);
 
@@ -187,11 +187,15 @@ pub const Output = struct {
         allocator.free(output.addrs);
     }
 
-    pub fn load(output: Output, flasher: anytype, maybe_progress: ?*Progress) !void {
+    pub fn load(output: Output, flasher: anytype, maybe_progress: ?Progress) !void {
         if (maybe_progress) |progress| {
-            try progress.step("Flashing", 0, output.addrs.len);
+            try progress.step(.{
+                .name = "Flashing",
+                .completed = 0,
+                .total = output.addrs.len,
+            });
         }
-        defer if (maybe_progress) |progress| progress.step_reset();
+        defer if (maybe_progress) |progress| progress.end();
 
         try flasher.begin();
 
@@ -199,7 +203,11 @@ pub const Output = struct {
             try flasher.load(addr, output.data[i * output.chunk_size ..][0..output.chunk_size]);
 
             if (maybe_progress) |progress| {
-                try progress.step("Flashing", i + 1, output.addrs.len);
+                try progress.step(.{
+                    .name = "Flashing",
+                    .completed = i + 1,
+                    .total = output.addrs.len,
+                });
             }
         }
 

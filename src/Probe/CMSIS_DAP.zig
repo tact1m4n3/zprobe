@@ -282,7 +282,7 @@ pub fn reg_read_repeated(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.Registe
         }
 
         for (data[offset..][0..words], 0..) |*value, i| {
-            value.* = std.mem.readInt(u32, cmsis_dap.buf[4 + i * 4..][0..4], .little);
+            value.* = std.mem.readInt(u32, cmsis_dap.buf[4 + i * 4 ..][0..4], .little);
         }
 
         offset += words;
@@ -309,7 +309,7 @@ pub fn reg_write_repeated(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.Regist
         });
 
         for (data[offset..][0..words], 0..) |value, i| {
-            std.mem.writeInt(u32, cmsis_dap.buf[5 + i * 4..][0..4], value, .little);
+            std.mem.writeInt(u32, cmsis_dap.buf[5 + i * 4 ..][0..4], value, .little);
         }
 
         _ = try cmsis_dap.dev.write(cmsis_dap.buf);
@@ -453,8 +453,8 @@ pub const CMSIS_DAP_Device = struct {
         _ = try libusb.call(c.libusb_open(device, &handle));
         errdefer c.libusb_close(handle);
 
-        // _ = try libusb.call(c.libusb_claim_interface(handle, interface_num));
-        // errdefer _ = c.libusb_release_interface(handle, interface_num);
+        _ = try libusb.call(c.libusb_claim_interface(handle, interface_num));
+        errdefer _ = c.libusb_release_interface(handle, interface_num);
 
         // TODO: with this we get timeout on second program run
         // _ = try libusb.call(c.libusb_set_interface_alt_setting(handle, interface_num, alt_setting_num));

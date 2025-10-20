@@ -45,20 +45,20 @@ pub const BlockLocationHint = union(enum) {
 pub const InitOptions = struct {
     location_hint: BlockLocationHint = .{ .blind = .{ .first_n_kilobytes = 4 } },
     timeout_ns: ?u64 = std.time.ns_per_s,
+    progress: ?Progress = null,
 };
 
 pub fn init(
     allocator: std.mem.Allocator,
     target: *Target,
     options: InitOptions,
-    maybe_progress: ?*Progress,
 ) !RTT_Host {
     const timeout: Timeout = try .init(.{
         .after = options.timeout_ns,
     });
 
     const result = loop: while (true) {
-        if (try find_control_block(allocator, target, options.location_hint, maybe_progress)) |result|
+        if (try find_control_block(allocator, target, options.location_hint, options.progress)) |result|
             break :loop result;
         try timeout.tick();
     } else return error.MissingControlBlock;
@@ -172,7 +172,7 @@ fn find_control_block(
     allocator: std.mem.Allocator,
     target: *Target,
     location_hint: BlockLocationHint,
-    maybe_progress: ?*Progress,
+    maybe_progress: ?Progress,
 ) !?ControlBlockFindResult {
     switch (location_hint) {
         .blind => |blind_hint| switch (blind_hint) {
@@ -207,7 +207,7 @@ fn find_control_block_in_range(
     target: *Target,
     start: u64,
     size: u64,
-    maybe_progress: ?*Progress,
+    maybe_progress: ?Progress,
 ) !?ControlBlockFindResult {
     const chunk_size = 1024;
     const extra_size = @sizeOf(Header);
@@ -218,11 +218,15 @@ fn find_control_block_in_range(
     const step_name = try std.fmt.allocPrint(allocator, "Scanning 0x{x:>8} - 0x{x:>8}", .{ start, start + size });
     defer allocator.free(step_name);
 
-    defer if (maybe_progress) |progress| progress.step_reset();
+    defer if (maybe_progress) |progress| progress.end();
 
     while (offset < size) : (offset += chunk_size) {
         if (maybe_progress) |progress| {
-            try progress.step(step_name, offset, size);
+            try progress.step(.{
+                .name = step_name,
+                .completed = offset,
+                .total = size,
+            });
         }
 
         @memcpy(buf[0..extra_size], buf[chunk_size..]); // can't overlap

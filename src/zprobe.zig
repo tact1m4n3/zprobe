@@ -1,9 +1,10 @@
-pub const libusb = @import("libusb.zig");
-pub const Progress = @import("Progress.zig");
-pub const Probe = @import("Probe.zig");
-pub const Target = @import("Target.zig");
 pub const arch = @import("arch.zig");
-pub const targets = @import("targets.zig");
+pub const libusb = @import("libusb.zig");
 pub const elf = @import("elf.zig");
 pub const flash = @import("flash.zig");
+pub const targets = @import("targets.zig");
+
+pub const Progress = @import("Progress.zig");
+pub const Probe = @import("Probe.zig");
 pub const RTT_Host = @import("RTT_Host.zig");
+pub const Target = @import("Target.zig");

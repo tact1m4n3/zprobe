@@ -2,6 +2,9 @@ const builtin = @import("builtin");
 const std = @import("std");
 const zprobe = @import("zprobe");
 
+const Feedback = @import("main/Feedback.zig");
+const signal = @import("main/signal.zig");
+
 pub const std_options: std.Options = .{
     .log_level = .err,
 };
@@ -25,14 +28,16 @@ pub fn main() !u8 {
     var stderr_writer_buf: [128]u8 = undefined;
     var stderr_writer = stderr.writer(&stderr_writer_buf);
 
-    var progress: zprobe.Progress = try .init(&stderr_writer.interface, .elegant);
-    defer progress.deinit();
+    try signal.init();
+
+    var feedback: Feedback = try .init(&stderr_writer.interface, .elegant);
+    defer feedback.deinit();
 
     // TODO: proper args parsing
-    main_impl(allocator, &progress, .{
+    main_impl(allocator, &feedback, .{
         .elf_path = args[1],
     }) catch |err| {
-        progress.fail(err);
+        feedback.fail(err);
         if (@errorReturnTrace()) |trace| {
             std.debug.dumpStackTrace(trace.*);
         }
@@ -48,7 +53,7 @@ pub const Args = struct {
 
 fn main_impl(
     allocator: std.mem.Allocator,
-    progress: *zprobe.Progress,
+    feedback: *Feedback,
     args: Args,
 ) !void {
     const elf_file = try std.fs.cwd().openFile(args.elf_path, .{});
@@ -59,74 +64,44 @@ fn main_impl(
     var elf_info: zprobe.elf.Info = try .init(allocator, &elf_file_reader);
     defer elf_info.deinit(allocator);
 
-    try progress.update("Connecting to probe");
+    try feedback.update("Connecting to probe");
     var probe: zprobe.Probe = try .create(allocator, .{});
     defer probe.destroy();
 
     try probe.attach(.mhz(1));
     defer probe.detach();
 
-    try progress.update("Initializing target");
+    try feedback.update("Initializing target");
     var rp2040: zprobe.targets.RP2040 = try .init(probe);
     defer rp2040.deinit();
 
-    try progress.update("Running system reset");
+    try feedback.update("Running system reset");
     try rp2040.target.system_reset();
 
-    try progress.update("Loading firmware");
-    try zprobe.flash.load_elf(allocator, &rp2040.target, elf_info, &elf_file_reader, progress);
+    try feedback.update("Loading firmware");
+    try zprobe.flash.load_elf(allocator, &rp2040.target, elf_info, &elf_file_reader, feedback.progress());
 
-    try progress.update("Resetting");
+    try feedback.update("Resetting");
     try rp2040.target.reset(.all);
 
-    try progress.update("Initializing RTT host");
+    try feedback.update("Initializing RTT host");
     var rtt_host: zprobe.RTT_Host = try .init(allocator, &rp2040.target, .{
         .location_hint = .{
-            .blind = .{ .first_n_kilobytes = 100 },
+            .blind = .{ .first_n_kilobytes = 1 },
         },
-    }, null);
+        .progress = feedback.progress(),
+    });
     defer rtt_host.deinit(allocator);
 
-    try progress.end();
+    try feedback.end();
 
     const stdout = std.fs.File.stdout();
     var stdout_writer = stdout.writer(&.{});
 
     var buf: [1024]u8 = undefined;
-    while (true) {
+    while (!signal.should_exit) {
         const n = try rtt_host.read(&rp2040.target, 0, &buf);
         try stdout_writer.interface.writeAll(buf[0..n]);
         std.Thread.sleep(1 * std.time.ns_per_ms);
     }
 }
-
-// pub fn set_ctrl_c_handler(comptime handler: *const fn () void) error{Unexpected}!void {
-//     if (builtin.os.tag == .windows) {
-//         const windows = std.os.windows;
-//         const handler_routine = struct {
-//             fn handler_routine(dwCtrlType: windows.DWORD) callconv(windows.WINAPI) windows.BOOL {
-//                 if (dwCtrlType == windows.CTRL_C_EVENT) {
-//                     handler();
-//                     return windows.TRUE;
-//                 } else {
-//                     // Ignore this event.
-//                     return windows.FALSE;
-//                 }
-//             }
-//         }.handler_routine;
-//         try windows.SetConsoleCtrlHandler(handler_routine, true);
-//     } else {
-//         const internal_handler = struct {
-//             fn internal_handler(sig: c_int) callconv(.c) void {
-//                 std.debug.assert(sig == std.posix.SIG.INT);
-//                 handler();
-//             }
-//         }.internal_handler;
-//         const act = std.posix.Sigaction{
-//             .handler = .{ .handler = internal_handler },
-//             .mask = std.posix.sigemptyset(),
-//             .flags = 0,
-//         };
-//         std.posix.sigaction(std.posix.SIG.INT, &act, null);
-//     }
-// }
