@@ -20,7 +20,6 @@ pub const interrupt = struct {
 };
 
 // chip independent
-// TODO: have different version for 64 bit, if we should support this
 pub const ImageHeader = extern struct {
     const MAGIC_32 = 0xBAD_C0FFE;
     const MAGIC_64 = 0xBAD_BAD_BAD_C00FFE;
