@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const Probe = @import("../Probe.zig");
 const ADI = @import("../arch/ARM_DebugInterface.zig");
 const Target = @import("../Target.zig");
 const cortex_m = ADI.cortex_m;
@@ -47,9 +46,7 @@ const target_def: Target = .{
     },
 };
 
-pub fn init(probe: Probe) !RP2040 {
-    const adi = probe.arm_debug_interface() orelse return error.ADI_NotSupported;
-
+pub fn init(adi: *ADI) !RP2040 {
     const core0_ap: ADI.Mem_AP = try .init(adi, AP_CORE0);
     const core1_ap: ADI.Mem_AP = try .init(adi, AP_CORE1);
 

@@ -25,6 +25,11 @@ pub fn build(b: *std.Build) void {
             .root_source_file = flash_stubs_bundle,
         });
 
+    const clap_dep = b.dependency("clap", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "zprobe",
         .root_module = b.createModule(.{
@@ -32,6 +37,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "clap", .module = clap_dep.module("clap") },
                 .{ .name = "zprobe", .module = mod },
             },
         }),

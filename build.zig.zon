@@ -19,6 +19,10 @@
             .url = "git+https://github.com/ZigEmbeddedGroup/microzig#50f31b340c5a65b8707e6fc0fb34cfc38f19be6d",
             .hash = "microzig-0.15.0-D20YSWaRyQA5A7dpxS4dhYx3_8VhRuR0DOWDVY6KeiD3",
         },
+        .clap = .{
+            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.11.0.tar.gz",
+            .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
+        },
     },
     .fingerprint = 0xa0717333ace084a,
 }
