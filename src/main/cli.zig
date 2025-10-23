@@ -145,12 +145,13 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
             const speed: zprobe.probe.Speed = load_res.args.speed orelse .mhz(10);
 
             const chip = load_res.args.chip orelse {
-                try writer.interface.writeAll("No chip specified. Use the `--chip <CHIP>` option to choose one. Run `zprobe list chips` for a list of all supported chips.\n");
+                try writer.interface.writeAll("No chip specified. Use the `--chip <CHIP>` option to choose one. " ++
+                    "Run `zprobe list chips` for a list of all supported chips.\n");
                 try print_command_help(&writer.interface, "load");
                 return error.MissingChip;
             };
 
-            const run_method = load_res.args.run orelse null;
+            const run_method = load_res.args.@"run-method" orelse null;
 
             return .{ .load = .{
                 .speed = speed,
@@ -188,11 +189,11 @@ const params = struct {
     );
 
     const load = clap.parseParamsComptime(
-        \\-h, --help       Display this help and exit.
-        \\--speed <SPEED>  Set the protocol speed for the probe. Must be suffixed by kHz or MHz. Defaults to 10MHz.
-        \\--chip <CHIP>    Set the chip of your target.
-        \\--run <RUN>      How should this image be ran? Valid options: `call_entry`, `reboot`.
-        \\--rtt            Print RTT logs after loading the image.
+        \\-h, --help          Display this help and exit.
+        \\--speed <SPEED>     Set the protocol speed for the probe. Must be suffixed by kHz or MHz. Defaults to 10MHz.
+        \\--chip <CHIP>       Set the chip of your target.
+        \\--run-method <RUN>  How should this image be ran? Valid options: `call_entry`, `reboot`.
+        \\--rtt               Print RTT logs after loading the image.
         \\<ELF_FILE>
         \\
     );

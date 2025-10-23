@@ -1,13 +1,13 @@
 const std = @import("std");
 const microzig = @import("microzig");
 
-const probe = @import("src/probe.zig");
-const chip = @import("src/chip.zig");
+const zprobe = @import("src/root.zig");
 
 pub const LoadOptions = struct {
     elf_file: std.Build.LazyPath,
-    speed: probe.Speed = .mhz(10),
-    chip: chip.Tag,
+    speed: zprobe.probe.Speed = .mhz(10),
+    run_method: ?zprobe.flash.RunMethod = null,
+    chip: zprobe.chip.Tag,
     rtt: bool = false,
 };
 
@@ -24,6 +24,7 @@ pub fn load(dep: *std.Build.Dependency, options: LoadOptions) *std.Build.Step {
         "--speed",
         b.fmt("{f}", .{options.speed}),
     });
+    if (options.run_method) |run_method| run.addArgs(&.{"--run-method", @tagName(run_method)});
     if (options.rtt) run.addArg("--rtt");
     run.addFileArg(options.elf_file);
 
