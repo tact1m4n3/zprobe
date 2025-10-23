@@ -157,6 +157,18 @@ pub fn write_register(target: *Target, core_id: CoreId, reg: RegisterId, value: 
     return target.vtable.core_access.write_register(target, core_id, reg, value);
 }
 
+pub fn find_memory_region_kind(
+    target: *Target,
+    addr: u64,
+    len: u64,
+) ?Target.MemoryRegion.Kind {
+    for (target.memory_map) |region| {
+        if (region.offset <= addr and addr + len < region.offset + region.length) {
+            return region.kind;
+        }
+    } else return null;
+}
+
 fn ensure_core_attached(target: *Target, core_id: CoreId) CommandError!void {
     if (target.attached_cores.is_selected(core_id)) return;
     try target.vtable.core_access.attach(target, core_id);

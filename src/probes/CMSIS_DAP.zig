@@ -3,8 +3,8 @@ const std = @import("std");
 const libusb = @import("../libusb.zig");
 const c = libusb.c;
 
-const Probe = @import("../Probe.zig");
-const ARM_DebugInterface = @import("../arch/ARM_DebugInterface.zig");
+const probe = @import("../probe.zig");
+const ADI = @import("../arch/ARM_DebugInterface.zig");
 
 const CMSIS_DAP = @This();
 
@@ -13,34 +13,31 @@ dap_index: u8 = 0,
 
 buf: []u8,
 
-adi: ARM_DebugInterface,
+adi: ADI,
 
-pub fn create(allocator: std.mem.Allocator, filter: libusb.DeviceIterator.Filter) !*CMSIS_DAP {
+pub fn init(allocator: std.mem.Allocator, filter: libusb.DeviceIterator.Filter) !CMSIS_DAP {
     var device_it: libusb.DeviceIterator = try libusb.DeviceIterator.init(filter);
     defer device_it.deinit();
 
     while (try device_it.next()) |device| {
-        return create_with_device(allocator, device) catch |err| switch (err) {
+        return init_with_device(allocator, device) catch |err| switch (err) {
             error.InvalidDevice => continue,
             else => return err,
         };
     } else return error.NoDeviceFound;
 }
 
-pub fn create_with_device(
+pub fn init_with_device(
     allocator: std.mem.Allocator,
     device: ?*c.struct_libusb_device,
-) !*CMSIS_DAP {
+) !CMSIS_DAP {
     const dev: CMSIS_DAP_Device = try .init(device);
     errdefer dev.deinit();
 
     const buf = try allocator.alloc(u8, dev.packet_size);
     errdefer allocator.free(buf);
 
-    const cmsis_dap: *CMSIS_DAP = try allocator.create(CMSIS_DAP);
-    errdefer allocator.destroy(cmsis_dap);
-
-    cmsis_dap.* = .{
+    return .{
         .dev = dev,
         .buf = buf,
         .adi = .{
@@ -55,40 +52,18 @@ pub fn create_with_device(
             .active_protocol = .swd,
         },
     };
-
-    return cmsis_dap;
 }
 
-pub fn destroy(cmsis_dap: *CMSIS_DAP) void {
+pub fn deinit(cmsis_dap: *CMSIS_DAP) void {
     const allocator = cmsis_dap.adi.allocator;
 
     cmsis_dap.adi.deinit();
     cmsis_dap.dev.deinit();
 
     allocator.free(cmsis_dap.buf);
-    allocator.destroy(cmsis_dap);
 }
 
-pub fn probe(cmsis_dap: *CMSIS_DAP) Probe {
-    return .{
-        .ptr = cmsis_dap,
-        .vtable = &.{
-            .destroy = destroy_erased,
-            .attach = attach,
-            .detach = detach,
-            .arm_debug_interface = arm_debug_interface,
-        },
-    };
-}
-
-fn destroy_erased(ptr: *anyopaque) void {
-    const cmsis_dap: *CMSIS_DAP = @ptrCast(@alignCast(ptr));
-    cmsis_dap.destroy();
-}
-
-fn attach(ptr: *anyopaque, speed: Probe.ProtocolSpeed) Probe.AttachError!void {
-    const cmsis_dap: *CMSIS_DAP = @ptrCast(@alignCast(ptr));
-
+pub fn attach(cmsis_dap: CMSIS_DAP, speed: probe.Speed) !void {
     _ = cmsis_dap.connect(switch (cmsis_dap.adi.active_protocol) {
         .swd => .swd,
         .jtag => .jtag,
@@ -112,17 +87,10 @@ fn attach(ptr: *anyopaque, speed: Probe.ProtocolSpeed) Probe.AttachError!void {
     };
 }
 
-fn detach(ptr: *anyopaque) void {
-    const cmsis_dap: *CMSIS_DAP = @ptrCast(@alignCast(ptr));
-
+pub fn detach(cmsis_dap: CMSIS_DAP) void {
     cmsis_dap.disconnect() catch |err| {
         std.log.err("failed to disconnect from probe: {t}", .{err});
     };
-}
-
-fn arm_debug_interface(ptr: *anyopaque) ?*ARM_DebugInterface {
-    const cmsis_dap: *CMSIS_DAP = @ptrCast(@alignCast(ptr));
-    return &cmsis_dap.adi;
 }
 
 pub fn connect(cmsis_dap: CMSIS_DAP, maybe_port: ?Protocol) !Protocol {
@@ -198,7 +166,7 @@ pub fn swj_sequence(
     try check_status(cmsis_dap.buf[1]);
 }
 
-pub fn reg_read(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, addr: u4) !u32 {
+pub fn reg_read(cmsis_dap: *CMSIS_DAP, port: ADI.RegisterPort, addr: u4) !u32 {
     cmsis_dap.buf[0] = @intFromEnum(CommandId.transfer);
     cmsis_dap.buf[1] = cmsis_dap.dap_index;
     cmsis_dap.buf[2] = 1;
@@ -224,7 +192,7 @@ pub fn reg_read(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, ad
     return std.mem.readInt(u32, cmsis_dap.buf[3..7], .little);
 }
 
-pub fn reg_write(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, addr: u4, value: u32) !void {
+pub fn reg_write(cmsis_dap: *CMSIS_DAP, port: ADI.RegisterPort, addr: u4, value: u32) !void {
     cmsis_dap.buf[0] = @intFromEnum(CommandId.transfer);
     cmsis_dap.buf[1] = cmsis_dap.dap_index;
     cmsis_dap.buf[2] = 1;
@@ -250,7 +218,7 @@ pub fn reg_write(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, a
     }
 }
 
-pub fn reg_read_repeated(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, addr: u4, data: []u32) !void {
+pub fn reg_read_repeated(cmsis_dap: *CMSIS_DAP, port: ADI.RegisterPort, addr: u4, data: []u32) !void {
     const words_per_cmd = (cmsis_dap.buf.len - 5) / @sizeOf(u32);
 
     var offset: usize = 0;
@@ -289,7 +257,7 @@ pub fn reg_read_repeated(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.Registe
     }
 }
 
-pub fn reg_write_repeated(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.RegisterPort, addr: u4, data: []const u32) !void {
+pub fn reg_write_repeated(cmsis_dap: *CMSIS_DAP, port: ADI.RegisterPort, addr: u4, data: []const u32) !void {
     const words_per_cmd = (cmsis_dap.buf.len - 5) / @sizeOf(u32);
 
     var offset: usize = 0;
@@ -328,7 +296,7 @@ pub fn reg_write_repeated(cmsis_dap: *CMSIS_DAP, port: ARM_DebugInterface.Regist
     }
 }
 
-fn adi_swj_sequence_impl(adi: *ARM_DebugInterface, bit_count: u8, sequence: u64) ARM_DebugInterface.Error!void {
+fn adi_swj_sequence_impl(adi: *ADI, bit_count: u8, sequence: u64) ADI.Error!void {
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     cmsis_dap.swj_sequence(bit_count, sequence) catch |err| {
@@ -337,7 +305,7 @@ fn adi_swj_sequence_impl(adi: *ARM_DebugInterface, bit_count: u8, sequence: u64)
     };
 }
 
-fn adi_raw_reg_read_impl(adi: *ARM_DebugInterface, port: ARM_DebugInterface.RegisterPort, addr: u4) ARM_DebugInterface.Error!u32 {
+fn adi_raw_reg_read_impl(adi: *ADI, port: ADI.RegisterPort, addr: u4) ADI.Error!u32 {
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     return cmsis_dap.reg_read(port, addr) catch |err| {
@@ -346,7 +314,7 @@ fn adi_raw_reg_read_impl(adi: *ARM_DebugInterface, port: ARM_DebugInterface.Regi
     };
 }
 
-fn adi_raw_reg_write_impl(adi: *ARM_DebugInterface, port: ARM_DebugInterface.RegisterPort, addr: u4, value: u32) ARM_DebugInterface.Error!void {
+fn adi_raw_reg_write_impl(adi: *ADI, port: ADI.RegisterPort, addr: u4, value: u32) ADI.Error!void {
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     cmsis_dap.reg_write(port, addr, value) catch |err| {
@@ -355,7 +323,7 @@ fn adi_raw_reg_write_impl(adi: *ARM_DebugInterface, port: ARM_DebugInterface.Reg
     };
 }
 
-fn adi_raw_reg_read_repeated_impl(adi: *ARM_DebugInterface, port: ARM_DebugInterface.RegisterPort, addr: u4, data: []u32) ARM_DebugInterface.Error!void {
+fn adi_raw_reg_read_repeated_impl(adi: *ADI, port: ADI.RegisterPort, addr: u4, data: []u32) ADI.Error!void {
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     return cmsis_dap.reg_read_repeated(port, addr, data) catch |err| {
@@ -364,7 +332,7 @@ fn adi_raw_reg_read_repeated_impl(adi: *ARM_DebugInterface, port: ARM_DebugInter
     };
 }
 
-fn adi_raw_reg_write_repeated_impl(adi: *ARM_DebugInterface, port: ARM_DebugInterface.RegisterPort, addr: u4, data: []const u32) ARM_DebugInterface.Error!void {
+fn adi_raw_reg_write_repeated_impl(adi: *ADI, port: ADI.RegisterPort, addr: u4, data: []const u32) ADI.Error!void {
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     cmsis_dap.reg_write_repeated(port, addr, data) catch |err| {

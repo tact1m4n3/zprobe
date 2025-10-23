@@ -121,7 +121,7 @@ pub fn update(feedback: *Feedback, text: []const u8) !void {
     feedback.cond.signal();
 }
 
-pub fn reset(feedback: *Feedback) void {
+pub fn reset(feedback: *Feedback) !void {
     try signal.were_we_interrupted();
 
     feedback.mutex.lock();
@@ -132,11 +132,11 @@ pub fn reset(feedback: *Feedback) void {
     try feedback.writer.flush();
 }
 
-pub fn fail(feedback: *Feedback, err: anyerror) void {
-    fail_feedback(feedback, err) catch {};
+pub fn fail(feedback: *Feedback) void {
+    feedback.do_fail() catch {};
 }
 
-fn fail_feedback(feedback: *Feedback, err: anyerror) !void {
+fn do_fail(feedback: *Feedback) !void {
     feedback.mutex.lock();
     defer feedback.mutex.unlock();
 
@@ -145,15 +145,10 @@ fn fail_feedback(feedback: *Feedback, err: anyerror) !void {
         try ansi_term.set_cursor_column(feedback.writer, 0);
         try feedback.writer.print("{s} ", .{task.text});
         try ansi_term.write_color(feedback.writer, .red);
-        try feedback.writer.writeAll("FAILED ");
+        try feedback.writer.writeAll("FAILED\n");
         try ansi_term.reset_color(feedback.writer);
-        try feedback.writer.print("with error.{t}\n", .{err});
-    } else {
-        try ansi_term.write_color(feedback.writer, .red);
-        try feedback.writer.print("Unexpected crash with error.{t}\n", .{err});
-        try ansi_term.reset_color(feedback.writer);
+        try feedback.writer.flush();
     }
-    try feedback.writer.flush();
 
     feedback.task = null;
 }
