@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const mod = b.addModule("zprobe", .{
-        .root_source_file = b.path("src/zprobe.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,

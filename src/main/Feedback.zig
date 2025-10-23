@@ -145,7 +145,7 @@ fn do_fail(feedback: *Feedback) !void {
         try ansi_term.set_cursor_column(feedback.writer, 0);
         try feedback.writer.print("{s} ", .{task.text});
         try ansi_term.write_color(feedback.writer, .red);
-        try feedback.writer.writeAll("FAILED ");
+        try feedback.writer.writeAll("FAILED\n");
         try ansi_term.reset_color(feedback.writer);
         try feedback.writer.flush();
     }

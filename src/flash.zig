@@ -5,6 +5,50 @@ const Timeout = @import("Timeout.zig");
 const Target = @import("Target.zig");
 const elf = @import("elf.zig");
 
+pub fn run_ram_image(
+    allocator: std.mem.Allocator,
+    target: *Target,
+    elf_info: elf.Info,
+    elf_file_reader: *std.fs.File.Reader,
+    progress: Progress,
+) !void {
+    var total_size: u64 = 0;
+    for (elf_info.load_segments.items) |segment| {
+        if (target.find_memory_region_kind(segment.physical_address, segment.memory_size) != .ram)
+            return error.SegmentNotIn_RAM;
+        total_size += segment.memory_size;
+    }
+
+    try progress.step(.{
+        .name = "Copying image",
+        .completed = 0,
+        .total = total_size,
+    });
+    defer progress.end();
+
+    var completed: u64 = 0;
+    for (elf_info.load_segments.items) |segment| {
+        const data = try allocator.alloc(u8, segment.memory_size);
+        errdefer allocator.free(data);
+
+        try elf_file_reader.seekTo(segment.file_offset);
+        try elf_file_reader.interface.readSliceAll(data[0..segment.file_size]);
+        @memset(data[segment.file_size..], 0);
+
+        try target.write_memory(segment.physical_address, data);
+
+        completed += segment.memory_size;
+        try progress.step(.{
+            .name = "Copying image",
+            .completed = 0,
+            .total = total_size,
+        });
+    }
+
+    try target.write_register(.boot, .instruction_pointer, elf_info.header.entry);
+    try target.run(.boot);
+}
+
 pub fn load_elf(
     allocator: std.mem.Allocator,
     target: *Target,
@@ -16,7 +60,7 @@ pub fn load_elf(
 
     var loader: Loader = .{};
     defer loader.deinit(allocator);
-    try loader.add_elf(allocator, elf_file_reader, elf_info, target.memory_map);
+    try loader.add_elf(allocator, target, elf_info, elf_file_reader);
 
     const output = try loader.bake(allocator, stub_flasher.page_size, stub_flasher.ideal_transfer_size);
     defer output.deinit(allocator);
@@ -37,17 +81,16 @@ pub const Loader = struct {
     pub fn add_elf(
         loader: *Loader,
         allocator: std.mem.Allocator,
-        elf_file_reader: *std.fs.File.Reader,
+        target: *Target,
         elf_info: elf.Info,
-        memory_map: []const Target.MemoryRegion,
+        elf_file_reader: *std.fs.File.Reader,
     ) !void {
         var new_segments: std.ArrayList(Segment) = .empty;
         defer new_segments.deinit(allocator);
         errdefer for (new_segments.items) |segment| allocator.free(segment.data);
 
         for (elf_info.load_segments.items) |elf_seg| {
-            const kind = try find_memory_region_kind(memory_map, elf_seg.physical_address, elf_seg.file_size);
-            if (kind != .flash) {
+            if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.file_size) != .flash) {
                 std.log.warn("found non flash segment", .{});
                 continue;
             }
@@ -536,41 +579,6 @@ test "load_segments" {
 
     try std.testing.expectEqualSlices(u8, expected_data, output.data);
     try std.testing.expectEqualSlices(u64, expected_addrs, output.addrs);
-}
-
-// TODO: relocate this
-pub fn run_ram_image(allocator: std.mem.Allocator, target: *Target, elf_reader: *std.fs.File.Reader) !void {
-    const header = try std.elf.Header.read(&elf_reader.interface);
-
-    var ph_iterator = header.iterateProgramHeaders(elf_reader);
-    while (try ph_iterator.next()) |ph| {
-        if (ph.p_type != std.elf.PT_LOAD) continue;
-
-        try elf_reader.seekTo(ph.p_offset);
-        const data = try elf_reader.interface.readAlloc(allocator, ph.p_filesz);
-        defer allocator.free(data);
-
-        const kind = try find_memory_region_kind(target.memory_map, ph.p_paddr, ph.p_memsz);
-        if (kind != .ram) return error.SectionNotInRam;
-
-        try target.write_memory(ph.p_paddr, data);
-    }
-
-    try target.write_register(.boot, .{ .special = .ip }, @truncate(header.entry));
-    try target.run(.boot);
-}
-
-fn find_memory_region_kind(
-    memory_map: []const Target.MemoryRegion,
-    addr: u64,
-    len: u64,
-) error{InvalidSection}!Target.MemoryRegion.Kind {
-    for (memory_map) |region| {
-        if (region.offset <= addr and addr + len < region.offset + region.length) {
-            return region.kind;
-        }
-    }
-    return error.InvalidSection;
 }
 
 fn unwrap_mut_opt(T: type, opt: *?T) *T {

@@ -2,24 +2,34 @@ const std = @import("std");
 const clap = @import("clap");
 const zprobe = @import("zprobe");
 
+// TODO: if we have other root level args we should make an `Args` struct for
+// that also contains `Command`
 pub const Command = union(CommandList) {
-    list,
-    chips,
-    rtt: struct {
-        speed: zprobe.probe.ProtocolSpeed,
-        chip: zprobe.chip.Tag,
-        elf_file: ?[]const u8,
-    },
-    flash: struct {
-        speed: zprobe.probe.ProtocolSpeed,
-        chip: zprobe.chip.Tag,
+    list: List,
+    load: Load,
+
+    pub const List = struct {
+        request: Request,
+        output_format: OutputFormat,
+
+        pub const Request = enum {
+            probes,
+            chips,
+        };
+
+        pub const OutputFormat = enum {
+            json,
+            zon,
+            text,
+        };
+    };
+
+    pub const Load = struct {
         elf_file: []const u8,
-    },
-    run: struct {
-        speed: zprobe.probe.ProtocolSpeed,
+        speed: zprobe.probe.Speed,
         chip: zprobe.chip.Tag,
-        elf_file: []const u8,
-    },
+        rtt: bool,
+    };
 };
 
 pub fn parse_args(allocator: std.mem.Allocator) !?Command {
@@ -34,8 +44,8 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
     defer writer.interface.flush() catch {};
 
     var main_diag: clap.Diagnostic = .{};
-    var main_res = clap.parseEx(clap.Help, &main_params, .{
-        .command = clap.parsers.enumeration(CommandList),
+    var main_res = clap.parseEx(clap.Help, &params.root, .{
+        .COMMAND = clap.parsers.enumeration(CommandList),
     }, &args_iter, .{
         .diagnostic = &main_diag,
         .allocator = allocator,
@@ -43,196 +53,105 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
     }) catch |err| switch (err) {
         error.NameNotPartOfEnum => {
             try writer.interface.writeAll("Invalid command.\n");
-            try print_main_help(&writer.interface);
+            try print_root_help(&writer.interface);
             return error.InvalidCommand;
         },
         else => {
             try main_diag.report(&writer.interface, err);
-            try print_main_help(&writer.interface);
+            try print_root_help(&writer.interface);
             return err;
         },
     };
     defer main_res.deinit();
 
     if (main_res.args.help != 0) {
-        try print_main_help(&writer.interface);
+        try print_root_help(&writer.interface);
         return null;
     }
 
     const command = main_res.positionals[0] orelse {
         try writer.interface.writeAll("Command missing.\n");
-        try print_main_help(&writer.interface);
+        try print_root_help(&writer.interface);
         return error.MissingCommand;
     };
 
     switch (command) {
-        .list => return .list,
-        .chips => return .chips,
-        .rtt => {
-            var flash_diag: clap.Diagnostic = .{};
-            var flash_res = clap.parseEx(clap.Help, &params.flash, .{
-                .speed = speed_parser,
-                .chip = chip_parser,
-                .elf_file = clap.parsers.string,
+        .list => {
+            var list_diag: clap.Diagnostic = .{};
+            var list_res = clap.parseEx(clap.Help, &params.list, .{
+                .REQUEST = enumeration_parser(Command.List.Request, error{InvalidRequest}, error.InvalidRequest),
+                .FORMAT = enumeration_parser(Command.List.OutputFormat, error{InvalidFormat}, error.InvalidFormat),
             }, &args_iter, .{
-                .diagnostic = &flash_diag,
+                .diagnostic = &list_diag,
                 .allocator = allocator,
-            }) catch |err| switch (err) {
-                error.InvalidSpeed => {
-                    try writer.interface.writeAll("Invalid protocol speed. Valid examples: 10MHz, 100kHz.\n");
-                    try print_command_help(&writer.interface, "flash");
-                    return err;
-                },
-                error.InvalidChip => {
-                    try writer.interface.writeAll("Invalid chip. We only support these ones:\n");
-                    try std.zon.stringify.serialize(std.enums.values(zprobe.chip.Tag), .{}, &writer.interface);
-                    try writer.interface.writeByte('\n');
-                    try print_command_help(&writer.interface, "flash");
-                    return err;
-                },
-                else => {
-                    try flash_diag.report(&writer.interface, err);
-                    try print_command_help(&writer.interface, "flash");
-                    return err;
-                },
+            }) catch |err| {
+                switch (err) {
+                    error.InvalidRequest => try writer.interface.writeAll("You haven't asked for anything to list.\n"),
+                    error.InvalidFormat => try writer.interface.writeAll("Invalid output format.\n"),
+                    else => try list_diag.report(&writer.interface, err),
+                }
+                try print_command_help(&writer.interface, "list");
+                return err;
             };
-            defer flash_res.deinit();
+            defer list_res.deinit();
 
-            if (flash_res.args.help != 0) {
-                try print_command_help(&writer.interface, "flash");
-                return null;
-            }
-
-            const speed: zprobe.probe.ProtocolSpeed = flash_res.args.speed orelse .mhz(10);
-
-            const chip = flash_res.args.chip orelse {
-                try writer.interface.writeAll("Missing chip. We only support these ones:\n");
-                try std.zon.stringify.serialize(std.enums.values(zprobe.chip.Tag), .{}, &writer.interface);
-                try writer.interface.writeByte('\n');
-                try print_command_help(&writer.interface, "flash");
+            const request = list_res.positionals[0] orelse {
+                try writer.interface.writeAll("Missing what to list.\n");
+                try print_command_help(&writer.interface, "load");
                 return error.MissingChip;
             };
 
-            const elf_file = flash_res.positionals[0] orelse null;
+            const output_format = list_res.args.format orelse .text;
 
-            return .{ .rtt = .{
-                .speed = speed,
-                .chip = chip,
-                .elf_file = elf_file,
+            return .{ .list = .{
+                .request = request,
+                .output_format = output_format,
             } };
         },
-        .flash => {
-            var flash_diag: clap.Diagnostic = .{};
-            var flash_res = clap.parseEx(clap.Help, &params.flash, .{
-                .speed = speed_parser,
-                .chip = chip_parser,
-                .elf_file = clap.parsers.string,
+        .load => {
+            var load_diag: clap.Diagnostic = .{};
+            var load_res = clap.parseEx(clap.Help, &params.load, .{
+                .SPEED = speed_parser,
+                .CHIP = enumeration_parser(zprobe.chip.Tag, error{InvalidChip}, error.InvalidChip),
+                .ELF_FILE = clap.parsers.string,
             }, &args_iter, .{
-                .diagnostic = &flash_diag,
+                .diagnostic = &load_diag,
                 .allocator = allocator,
-            }) catch |err| switch (err) {
-                error.InvalidSpeed => {
-                    try writer.interface.writeAll("Invalid protocol speed. Valid examples: 10MHz, 100kHz.\n");
-                    try print_command_help(&writer.interface, "flash");
-                    return err;
-                },
-                error.InvalidChip => {
-                    try writer.interface.writeAll("Invalid chip. We only support these ones:\n");
-                    try std.zon.stringify.serialize(std.enums.values(zprobe.chip.Tag), .{}, &writer.interface);
-                    try writer.interface.writeByte('\n');
-                    try print_command_help(&writer.interface, "flash");
-                    return err;
-                },
-                else => {
-                    try flash_diag.report(&writer.interface, err);
-                    try print_command_help(&writer.interface, "flash");
-                    return err;
-                },
+            }) catch |err| {
+                switch (err) {
+                    error.InvalidSpeed => try writer.interface.writeAll("Invalid protocol speed. Valid examples: 10MHz, 100kHz.\n"),
+                    error.InvalidChip => try writer.interface.writeAll("Invalid chip. Run `zprobe list chips` for a list of all supported chips.\n"),
+                    else => try load_diag.report(&writer.interface, err),
+                }
+                try print_command_help(&writer.interface, "load");
+                return err;
             };
-            defer flash_res.deinit();
+            defer load_res.deinit();
 
-            if (flash_res.args.help != 0) {
-                try print_command_help(&writer.interface, "flash");
+            if (load_res.args.help != 0) {
+                try print_command_help(&writer.interface, "load");
                 return null;
             }
 
-            const speed: zprobe.probe.ProtocolSpeed = flash_res.args.speed orelse .mhz(10);
-
-            const chip = flash_res.args.chip orelse {
-                try writer.interface.writeAll("Missing chip. We only support these ones:\n");
-                try std.zon.stringify.serialize(std.enums.values(zprobe.chip.Tag), .{}, &writer.interface);
-                try writer.interface.writeByte('\n');
-                try print_command_help(&writer.interface, "flash");
-                return error.MissingChip;
-            };
-
-            const elf_file = flash_res.positionals[0] orelse {
-                try writer.interface.writeAll("Missing ELF.\n");
-                try print_command_help(&writer.interface, "flash");
+            const elf_file = load_res.positionals[0] orelse {
+                try writer.interface.writeAll("No ELF specified.\n");
+                try print_command_help(&writer.interface, "load");
                 return error.Missing_ELF;
             };
 
-            return .{ .flash = .{
-                .speed = speed,
-                .chip = chip,
-                .elf_file = elf_file,
-            } };
-        },
-        .run => {
-            var flash_diag: clap.Diagnostic = .{};
-            var flash_res = clap.parseEx(clap.Help, &params.flash, .{
-                .speed = speed_parser,
-                .chip = chip_parser,
-                .elf_file = clap.parsers.string,
-            }, &args_iter, .{
-                .diagnostic = &flash_diag,
-                .allocator = allocator,
-            }) catch |err| switch (err) {
-                error.InvalidSpeed => {
-                    try writer.interface.writeAll("Invalid protocol speed. Valid examples: 10MHz, 100kHz.\n");
-                    try print_command_help(&writer.interface, "flash");
-                    return err;
-                },
-                error.InvalidChip => {
-                    try writer.interface.writeAll("Invalid chip. We only support these ones:\n");
-                    try std.zon.stringify.serialize(std.enums.values(zprobe.chip.Tag), .{}, &writer.interface);
-                    try writer.interface.writeByte('\n');
-                    try print_command_help(&writer.interface, "flash");
-                    return err;
-                },
-                else => {
-                    try flash_diag.report(&writer.interface, err);
-                    try print_command_help(&writer.interface, "flash");
-                    return err;
-                },
-            };
-            defer flash_res.deinit();
+            const speed: zprobe.probe.Speed = load_res.args.speed orelse .mhz(10);
 
-            if (flash_res.args.help != 0) {
-                try print_command_help(&writer.interface, "flash");
-                return null;
-            }
-
-            const speed: zprobe.probe.ProtocolSpeed = flash_res.args.speed orelse .mhz(10);
-
-            const chip = flash_res.args.chip orelse {
-                try writer.interface.writeAll("Missing chip. We only support these ones:\n");
-                try std.zon.stringify.serialize(std.enums.values(zprobe.chip.Tag), .{}, &writer.interface);
-                try writer.interface.writeByte('\n');
-                try print_command_help(&writer.interface, "flash");
+            const chip = load_res.args.chip orelse {
+                try writer.interface.writeAll("No chip specified. Use the `--chip <CHIP>` option to choose one. Run `zprobe list chips` for a list of all supported chips.\n");
+                try print_command_help(&writer.interface, "load");
                 return error.MissingChip;
             };
 
-            const elf_file = flash_res.positionals[0] orelse {
-                try writer.interface.writeAll("Missing ELF.\n");
-                try print_command_help(&writer.interface, "flash");
-                return error.Missing_ELF;
-            };
-
-            return .{ .run = .{
+            return .{ .load = .{
                 .speed = speed,
                 .chip = chip,
                 .elf_file = elf_file,
+                .rtt = load_res.args.rtt != 0,
             } };
         },
     }
@@ -240,32 +159,34 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
 
 pub const CommandList = enum {
     list,
-    chips,
-    rtt,
-    flash,
-    run,
+    load,
 };
 
 const command_descriptions = struct {
-    pub const list = "List connected probes.";
-    pub const chips = "List all supported chips.";
-    pub const flash = "Load an ELF onto the target.";
-    pub const rtt = "Print RTT logs.";
-    pub const run = "Load an ELF onto the target, execute it and print RTT logs.";
+    pub const list = "List stuff like connected probes or supported chips.";
+    pub const load = "Load an ELF onto the target, maybe execute it and maybe print RTT logs.";
 };
 
-const main_params = clap.parseParamsComptime(
-    \\-h, --help  Display this help and exit.
-    \\<command>
-    \\
-);
-
 const params = struct {
-    const flash = clap.parseParamsComptime(
+    const root = clap.parseParamsComptime(
+        \\-h, --help  Display this help and exit.
+        \\<COMMAND>
+        \\
+    );
+
+    const list = clap.parseParamsComptime(
         \\-h, --help         Display this help and exit.
-        \\--speed <speed>    Set the protocol speed for the probe. Must be suffixed by kHz or MHz. Defaults to 10MHz.
-        \\--chip <chip>      Set the chip.
-        \\<elf_file>
+        \\--format <FORMAT>  What format to use for the output.
+        \\<REQUEST>          What do you want to list: probes or chips.
+        \\
+    );
+
+    const load = clap.parseParamsComptime(
+        \\-h, --help       Display this help and exit.
+        \\--speed <SPEED>  Set the protocol speed for the probe. Must be suffixed by kHz or MHz. Defaults to 10MHz.
+        \\--chip <CHIP>    Set the chip of your target.
+        \\--rtt            Start an RTT monitor after loading the image.
+        \\<ELF_FILE>
         \\
     );
 };
@@ -277,11 +198,11 @@ const help_options: clap.HelpOptions = .{
     .spacing_between_parameters = 0,
 };
 
-fn print_main_help(writer: *std.Io.Writer) !void {
+fn print_root_help(writer: *std.Io.Writer) !void {
     try writer.writeAll("Usage: zprobe ");
-    try clap.usage(writer, clap.Help, &main_params);
+    try clap.usage(writer, clap.Help, &params.root);
     try writer.writeByte('\n');
-    try clap.help(writer, clap.Help, &main_params, help_options);
+    try clap.help(writer, clap.Help, &params.root, help_options);
     try writer.writeByte('\n');
     try print_commands(writer);
     try writer.writeByte('\n');
@@ -314,7 +235,15 @@ fn print_commands(writer: *std.Io.Writer) !void {
     try writer.writeAll("Command list:\n" ++ command_list);
 }
 
-fn speed_parser(value: []const u8) error{InvalidSpeed}!zprobe.probe.ProtocolSpeed {
+fn enumeration_parser(comptime T: type, comptime E: type, err: E) fn ([]const u8) E!T {
+    return struct {
+        fn parse(in: []const u8) E!T {
+            return std.meta.stringToEnum(T, in) orelse err;
+        }
+    }.parse;
+}
+
+fn speed_parser(value: []const u8) error{InvalidSpeed}!zprobe.probe.Speed {
     if (std.mem.endsWith(u8, value, "kHz")) {
         return .khz(std.fmt.parseInt(u32, value[0 .. value.len - 3], 10) catch return error.InvalidSpeed);
     } else if (std.mem.endsWith(u8, value, "MHz")) {
@@ -322,8 +251,4 @@ fn speed_parser(value: []const u8) error{InvalidSpeed}!zprobe.probe.ProtocolSpee
     } else {
         return error.InvalidSpeed;
     }
-}
-
-fn chip_parser(value: []const u8) error{InvalidChip}!zprobe.chip.Tag {
-    return std.meta.stringToEnum(zprobe.chip.Tag, value) orelse return error.InvalidChip;
 }

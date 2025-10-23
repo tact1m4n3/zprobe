@@ -1,8 +1,8 @@
 const std = @import("std");
 
 pub const Info = struct {
-    endian: std.builtin.Endian,
     format: Format,
+    header: std.elf.Header,
     string_table: []const u8,
     sections: std.StringHashMapUnmanaged(Section),
     load_segments: std.ArrayList(Segment),
@@ -35,17 +35,17 @@ pub const Info = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, file_reader: *std.fs.File.Reader) !Info {
-        var elf_header = try std.elf.Header.read(&file_reader.interface);
+        var header = try std.elf.Header.read(&file_reader.interface);
 
-        const format: Format = if (elf_header.is_64) .@"64" else .@"32";
+        const format: Format = if (header.is_64) .@"64" else .@"32";
 
         const string_table = blk: {
             var shdr: std.elf.Elf64_Shdr = undefined;
             if (format == .@"32") {
                 // var shdr32: std.elf.Elf32_Shdr = undefined;
-                const offset = elf_header.shoff + @sizeOf(std.elf.Elf32_Shdr) * elf_header.shstrndx;
+                const offset = header.shoff + @sizeOf(std.elf.Elf32_Shdr) * header.shstrndx;
                 try file_reader.seekTo(offset);
-                const shdr32 = try file_reader.interface.takeStruct(std.elf.Elf32_Shdr, elf_header.endian);
+                const shdr32 = try file_reader.interface.takeStruct(std.elf.Elf32_Shdr, header.endian);
 
                 shdr = .{
                     .sh_name = shdr32.sh_name,
@@ -60,9 +60,9 @@ pub const Info = struct {
                     .sh_entsize = shdr32.sh_entsize,
                 };
             } else {
-                const offset = elf_header.shoff + @sizeOf(std.elf.Elf64_Shdr) * elf_header.shstrndx;
+                const offset = header.shoff + @sizeOf(std.elf.Elf64_Shdr) * header.shstrndx;
                 try file_reader.seekTo(offset);
-                shdr = try file_reader.interface.takeStruct(std.elf.Elf64_Shdr, elf_header.endian);
+                shdr = try file_reader.interface.takeStruct(std.elf.Elf64_Shdr, header.endian);
             }
 
             try file_reader.seekTo(shdr.sh_offset);
@@ -73,7 +73,7 @@ pub const Info = struct {
         var sections: std.StringHashMapUnmanaged(Section) = .empty;
         errdefer sections.deinit(allocator);
 
-        var section_header_it = elf_header.iterateSectionHeaders(file_reader);
+        var section_header_it = header.iterateSectionHeaders(file_reader);
         while (try section_header_it.next()) |shdr| {
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(string_table[shdr.sh_name..])));
             try sections.put(allocator, name, .{
@@ -86,7 +86,7 @@ pub const Info = struct {
         var loaded_regions: std.ArrayList(Segment) = .empty;
         errdefer loaded_regions.deinit(allocator);
 
-        var program_header_iterator = elf_header.iterateProgramHeaders(file_reader);
+        var program_header_iterator = header.iterateProgramHeaders(file_reader);
         while (try program_header_iterator.next()) |phdr| {
             if (phdr.p_type != std.elf.PT_LOAD) continue;
             if (phdr.p_memsz == 0) continue;
@@ -107,7 +107,7 @@ pub const Info = struct {
         }
 
         return .{
-            .endian = elf_header.endian,
+            .header = header,
             .format = format,
             .string_table = string_table,
             .sections = sections,
@@ -128,7 +128,7 @@ pub fn get_symbol(reader: *std.fs.File.Reader, info: Info, name: []const u8) !?s
     while (reader.pos < symbol_section.file_offset + symbol_section.size) {
         const sym: std.elf.Elf64_Sym = switch (info.format) {
             .@"32" => blk: {
-                const sym_32 = try reader.interface.takeStruct(std.elf.Elf32_Sym, info.endian);
+                const sym_32 = try reader.interface.takeStruct(std.elf.Elf32_Sym, info.header.endian);
                 break :blk .{
                     .st_name = sym_32.st_name,
                     .st_info = sym_32.st_info,
@@ -138,7 +138,7 @@ pub fn get_symbol(reader: *std.fs.File.Reader, info: Info, name: []const u8) !?s
                     .st_size = sym_32.st_size,
                 };
             },
-            .@"64" => try reader.interface.takeStruct(std.elf.Elf64_Sym, info.endian),
+            .@"64" => try reader.interface.takeStruct(std.elf.Elf64_Sym, info.header.endian),
         };
 
         const current_name = std.mem.span(@as([*:0]const u8, @ptrCast(info.string_table[sym.st_name..])));

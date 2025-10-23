@@ -1,6 +1,6 @@
 const Target = @import("Target.zig");
 
-pub const RP2040 = @import("chip/RP2040.zig");
+pub const RP2040 = @import("chips/RP2040.zig");
 
 pub const Tag = enum {
     RP2040,

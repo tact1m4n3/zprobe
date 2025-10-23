@@ -4,7 +4,7 @@ const ARM_DebugInterface = @import("arch/ARM_DebugInterface.zig");
 const libusb = @import("libusb.zig");
 const c = libusb.c;
 
-pub const CMSIS_DAP = @import("probe/CMSIS_DAP.zig");
+pub const CMSIS_DAP = @import("probes/CMSIS_DAP.zig");
 
 pub const Tag = enum {
     cmsis_dap,
@@ -36,7 +36,7 @@ pub const Any = union(Tag) {
         };
     }
 
-    pub fn attach(any_probe: *Any, speed: ProtocolSpeed) !void {
+    pub fn attach(any_probe: *Any, speed: Speed) !void {
         return switch (any_probe.*) {
             inline else => |*probe| try probe.attach(speed),
         };
@@ -55,22 +55,22 @@ pub const Any = union(Tag) {
     }
 };
 
-pub const ProtocolSpeed = enum(u32) {
+pub const Speed = enum(u32) {
     _,
 
-    pub fn hz(speed_in_hz: u32) ProtocolSpeed {
+    pub fn hz(speed_in_hz: u32) Speed {
         return @enumFromInt(speed_in_hz);
     }
 
-    pub fn khz(speed_in_khz: u32) ProtocolSpeed {
+    pub fn khz(speed_in_khz: u32) Speed {
         return @enumFromInt(speed_in_khz * 1_000);
     }
 
-    pub fn mhz(speed_in_mhz: u32) ProtocolSpeed {
+    pub fn mhz(speed_in_mhz: u32) Speed {
         return @enumFromInt(speed_in_mhz * 1_000_000);
     }
 
-    pub fn format(speed: ProtocolSpeed, writer: *std.Io.Writer) !void {
+    pub fn format(speed: Speed, writer: *std.Io.Writer) !void {
         const speed_in_hz = @intFromEnum(speed);
         if (speed_in_hz >= 1_000_000) {
             try writer.print("{} MHz", .{speed_in_hz / 1_000_000});
