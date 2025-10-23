@@ -119,12 +119,14 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
 
     try feedback.update("Loading image");
 
-    if (is_ram_image(target, elf_info)) {
-        try zprobe.flash.run_ram_image(allocator, target, elf_info, &elf_file_reader, feedback.progress());
-    } else {
-        try zprobe.flash.load_elf(allocator, target, elf_info, &elf_file_reader, feedback.progress());
-        try target.reset(.all);
-    }
+    zprobe.flash.load_elf(allocator, target, elf_info, &elf_file_reader, args.run_method, feedback.progress()) catch |err| switch (err) {
+        error.RunMethodRequired => {
+            // TODO: Feedback: Provide custom log
+            std.log.err("Please specify how you want the image to be ran with the `--run_method` option. Your elf contains segments in both flash and ram.", .{});
+            return err;
+        },
+        else => return err,
+    };
 
     if (args.rtt) {
         try feedback.update("Initializing RTT host");
@@ -149,11 +151,4 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
             std.Thread.sleep(1 * std.time.ns_per_ms);
         }
     }
-}
-
-fn is_ram_image(target: *zprobe.Target, elf_info: zprobe.elf.Info) bool {
-    for (elf_info.load_segments.items) |segment| {
-        if (target.find_memory_region_kind(segment.physical_address, segment.memory_size) != .ram)
-            return false;
-    } else return true;
 }

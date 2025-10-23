@@ -53,8 +53,8 @@ pub const Config = struct {
 
 const Task = struct {
     text: []const u8,
-    step_name: ?[]const u8 = null,
-    total: usize = 0,
+    name: ?[]const u8 = null,
+    length: usize = 0,
     completed: usize = 0,
 };
 
@@ -73,7 +73,8 @@ pub fn progress(feedback: *Feedback) Progress {
     return .{
         .ptr = feedback,
         .vtable = &.{
-            .step = type_erased_progress_step,
+            .begin = type_erased_progress_begin,
+            .increment = type_erased_progress_increment,
             .end = type_erased_progress_end,
         },
     };
@@ -153,26 +154,34 @@ fn do_fail(feedback: *Feedback) !void {
     feedback.task = null;
 }
 
-fn progress_step(feedback: *Feedback, s: Progress.Step) !void {
+fn type_erased_progress_begin(ptr: *anyopaque, name: []const u8, length: usize) Progress.Error!void {
+    const feedback: *Feedback = @ptrCast(@alignCast(ptr));
+
     try signal.were_we_interrupted();
 
     feedback.mutex.lock();
     defer feedback.mutex.unlock();
 
     if (feedback.task) |*task| {
-        task.step_name = s.name;
-        task.completed = s.completed;
-        task.total = s.total;
-        try render(feedback, task.*);
+        task.name = name;
+        task.completed = 0;
+        task.length = length;
+        render(feedback, task.*) catch return error.Other;
     }
 }
 
-fn type_erased_progress_step(ptr: *anyopaque, s: Progress.Step) Progress.StepError!void {
+fn type_erased_progress_increment(ptr: *anyopaque, by: usize) Progress.Error!void {
     const feedback: *Feedback = @ptrCast(@alignCast(ptr));
-    feedback.progress_step(s) catch |err| switch (err) {
-        error.Interrupt => return error.Interrupt,
-        else => return error.Other,
-    };
+
+    try signal.were_we_interrupted();
+
+    feedback.mutex.lock();
+    defer feedback.mutex.unlock();
+
+    if (feedback.task) |*task| {
+        task.completed = @min(task.length, task.completed + by);
+        render(feedback, task.*) catch return error.Other;
+    } else @panic("Progress update when no task is started.");
 }
 
 fn type_erased_progress_end(ptr: *anyopaque) void {
@@ -181,9 +190,9 @@ fn type_erased_progress_end(ptr: *anyopaque) void {
     defer feedback.mutex.unlock();
 
     if (feedback.task) |*task| {
-        task.step_name = null;
+        task.name = null;
         task.completed = 0;
-        task.total = 0;
+        task.length = 0;
         render(feedback, task.*) catch {};
     }
 }
@@ -194,14 +203,14 @@ fn render(feedback: *Feedback, task: Task) !void {
     try write_symbol(feedback.writer, feedback.config.spinner_symbols[feedback.symbol_index], 1, feedback.config.spinner_color);
     try feedback.writer.print(" {s}", .{task.text});
 
-    if (task.step_name) |step_name| {
+    if (task.name) |step_name| {
         try feedback.writer.print(" > {s}", .{step_name});
     }
 
-    if (task.total != 0) {
+    if (task.length != 0) {
         const bar_width = 40;
         const fill_symbols_count = feedback.config.bar_fill_symbols.len;
-        const fill_width: f32 = @as(f32, @floatFromInt(task.completed)) / @as(f32, @floatFromInt(task.total)) * bar_width;
+        const fill_width: f32 = @as(f32, @floatFromInt(task.completed)) / @as(f32, @floatFromInt(task.length)) * bar_width;
 
         try feedback.writer.writeByte(' ');
 
@@ -218,7 +227,7 @@ fn render(feedback: *Feedback, task: Task) !void {
             try write_symbol(feedback.writer, feedback.config.bar_end_symbol, 1, feedback.config.bar_color);
         }
 
-        try feedback.writer.print(" [{}/{}]", .{ task.completed, task.total });
+        try feedback.writer.print(" [{}/{}]", .{ task.completed, task.length });
     }
 
     try feedback.writer.flush();

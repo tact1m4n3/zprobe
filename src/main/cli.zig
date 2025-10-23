@@ -28,6 +28,7 @@ pub const Command = union(CommandList) {
         elf_file: []const u8,
         speed: zprobe.probe.Speed,
         chip: zprobe.chip.Tag,
+        run_method: ?zprobe.flash.RunMethod,
         rtt: bool,
     };
 };
@@ -113,6 +114,7 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
             var load_res = clap.parseEx(clap.Help, &params.load, .{
                 .SPEED = speed_parser,
                 .CHIP = enumeration_parser(zprobe.chip.Tag, error{InvalidChip}, error.InvalidChip),
+                .RUN = enumeration_parser(zprobe.flash.RunMethod, error{InvalidRunMethod}, error.InvalidRunMethod),
                 .ELF_FILE = clap.parsers.string,
             }, &args_iter, .{
                 .diagnostic = &load_diag,
@@ -121,6 +123,7 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
                 switch (err) {
                     error.InvalidSpeed => try writer.interface.writeAll("Invalid protocol speed. Valid examples: 10MHz, 100kHz.\n"),
                     error.InvalidChip => try writer.interface.writeAll("Invalid chip. Run `zprobe list chips` for a list of all supported chips.\n"),
+                    error.InvalidRunMethod => try writer.interface.writeAll("Invalid run method.\n"),
                     else => try load_diag.report(&writer.interface, err),
                 }
                 try print_command_help(&writer.interface, "load");
@@ -147,11 +150,14 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
                 return error.MissingChip;
             };
 
+            const run_method = load_res.args.run orelse null;
+
             return .{ .load = .{
                 .speed = speed,
                 .chip = chip,
-                .elf_file = elf_file,
+                .run_method = run_method,
                 .rtt = load_res.args.rtt != 0,
+                .elf_file = elf_file,
             } };
         },
     }
@@ -177,7 +183,7 @@ const params = struct {
     const list = clap.parseParamsComptime(
         \\-h, --help         Display this help and exit.
         \\--format <FORMAT>  What format to use for the output.
-        \\<REQUEST>          What do you want to list: probes or chips.
+        \\<REQUEST>          What do you want to list? Valid options: `probes`, `chips`.
         \\
     );
 
@@ -185,7 +191,8 @@ const params = struct {
         \\-h, --help       Display this help and exit.
         \\--speed <SPEED>  Set the protocol speed for the probe. Must be suffixed by kHz or MHz. Defaults to 10MHz.
         \\--chip <CHIP>    Set the chip of your target.
-        \\--rtt            Start an RTT monitor after loading the image.
+        \\--run <RUN>      How should this image be ran? Valid options: `call_entry`, `reboot`.
+        \\--rtt            Print RTT logs after loading the image.
         \\<ELF_FILE>
         \\
     );

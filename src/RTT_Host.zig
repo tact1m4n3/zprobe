@@ -58,7 +58,7 @@ pub fn init(
     });
 
     const result = loop: while (true) {
-        if (try find_control_block(allocator, target, options.location_hint, timeout, options.progress)) |result|
+        if (try find_control_block(target, options.location_hint, timeout, options.progress)) |result|
             break :loop result;
     } else return error.MissingControlBlock;
 
@@ -168,7 +168,6 @@ const ControlBlockFindResult = struct {
 };
 
 fn find_control_block(
-    allocator: std.mem.Allocator,
     target: *Target,
     location_hint: BlockLocationHint,
     timeout: Timeout,
@@ -176,26 +175,26 @@ fn find_control_block(
 ) !?ControlBlockFindResult {
     switch (location_hint) {
         .blind => |blind_hint| switch (blind_hint) {
-            .region => |region| return try find_control_block_in_range(allocator, target, region.start, region.size, timeout, maybe_progress),
+            .region => |region| return try find_control_block_in_range(target, region.start, region.size, timeout, maybe_progress),
             .first_n_kilobytes => |n| for (target.memory_map) |region| {
-                if ((try find_control_block_in_range(allocator, target, region.offset, @min(n * 1024, region.length), timeout, maybe_progress))) |result| {
+                if ((try find_control_block_in_range(target, region.offset, @min(n * 1024, region.length), timeout, maybe_progress))) |result| {
                     return result;
                 }
             } else return null,
         },
         .with_elf => |with_elf_hint| switch (with_elf_hint.method) {
             .auto => for (with_elf_hint.elf_info.load_segments.items) |seg| {
-                if ((try find_control_block_in_range(allocator, target, seg.virtual_address, seg.memory_size, timeout, maybe_progress))) |result| {
+                if ((try find_control_block_in_range(target, seg.virtual_address, seg.memory_size, timeout, maybe_progress))) |result| {
                     return result;
                 }
             } else return null,
             .section_name => |name| {
                 const section = with_elf_hint.elf_info.sections.get(name) orelse return null;
-                return find_control_block_in_range(allocator, target, section.address, section.size, timeout, maybe_progress);
+                return find_control_block_in_range(target, section.address, section.size, timeout, maybe_progress);
             },
             .symbol_name => |name| {
                 const symbol = (try elf.get_symbol(with_elf_hint.elf_file_reader, with_elf_hint.elf_info, name)) orelse return null;
-                return find_control_block_in_range(allocator, target, symbol.st_value, symbol.st_size, timeout, maybe_progress);
+                return find_control_block_in_range(target, symbol.st_value, symbol.st_size, timeout, maybe_progress);
             },
         },
     }
@@ -203,7 +202,6 @@ fn find_control_block(
 
 // TODO: maybe use memory reader
 fn find_control_block_in_range(
-    allocator: std.mem.Allocator,
     target: *Target,
     start: u64,
     size: u64,
@@ -216,34 +214,27 @@ fn find_control_block_in_range(
     var offset: u64 = 0;
 
     // NOTE: we could also statically allocate this
-    const step_name = try std.fmt.allocPrint(allocator, "Scanning 0x{x:>8} - 0x{x:>8}", .{ start, start + size });
-    defer allocator.free(step_name);
-
+    if (maybe_progress) |progress| try progress.begin("Scanning", size);
     defer if (maybe_progress) |progress| progress.end();
 
-    while (offset < size) : (offset += chunk_size) {
+    while (offset < size) : ({
+        offset += chunk_size;
+        if (maybe_progress) |progress| try progress.increment(chunk_size);
+    }) {
         try timeout.tick();
-
-        if (maybe_progress) |progress| {
-            try progress.step(.{
-                .name = step_name,
-                .completed = offset,
-                .total = size,
-            });
-        }
 
         @memcpy(buf[0..extra_size], buf[chunk_size..]); // can't overlap
 
         try target.read_memory(start + offset, buf[extra_size..]);
-        const position = std.mem.indexOf(u8, &buf, "SEGGER RTT") orelse continue;
+        if (std.mem.indexOf(u8, &buf, "SEGGER RTT")) |position| {
+            const address = start + offset + position - extra_size;
+            const header: Header = bytes_as_struct(Header, buf[position..][0..@sizeOf(Header)], target.endian);
 
-        const address = start + offset + position - extra_size;
-        const header: Header = bytes_as_struct(Header, buf[position..][0..@sizeOf(Header)], target.endian);
-
-        return .{
-            .address = address,
-            .header = header,
-        };
+            return .{
+                .address = address,
+                .header = header,
+            };
+        }
     } else return null;
 }
 

@@ -6,23 +6,22 @@ ptr: *anyopaque,
 vtable: *const Vtable,
 
 pub const Vtable = struct {
-    step: *const fn (ptr: *anyopaque, s: Step) StepError!void,
+    begin: *const fn (ptr: *anyopaque, name: []const u8, length: usize) Error!void,
+    increment: *const fn (ptr: *anyopaque, by: usize) Error!void,
     end: *const fn (ptr: *anyopaque) void,
 };
 
-pub const StepError = error {
+pub const Error = error {
     Other,
     Interrupt,
 };
 
-pub const Step = struct {
-    name: []const u8,
-    completed: usize,
-    total: usize,
-};
+pub fn begin(progress: Progress, name: []const u8, length: usize) Error!void {
+    try progress.vtable.begin(progress.ptr, name, length);
+}
 
-pub fn step(progress: Progress, s: Step) StepError!void {
-    try progress.vtable.step(progress.ptr, s);
+pub fn increment(progress: Progress, by: usize) Error!void {
+    try progress.vtable.increment(progress.ptr, by);
 }
 
 pub fn end(progress: Progress) void {

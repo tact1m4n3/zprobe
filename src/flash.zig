@@ -5,51 +5,47 @@ const Timeout = @import("Timeout.zig");
 const Target = @import("Target.zig");
 const elf = @import("elf.zig");
 
-pub fn run_ram_image(
+pub const RunMethod = enum {
+    reboot,
+    call_entry,
+};
+
+pub fn load_elf(
     allocator: std.mem.Allocator,
     target: *Target,
     elf_info: elf.Info,
     elf_file_reader: *std.fs.File.Reader,
-    progress: Progress,
+    maybe_run_method: ?RunMethod,
+    maybe_progress: ?Progress,
 ) !void {
-    var total_size: u64 = 0;
-    for (elf_info.load_segments.items) |segment| {
-        if (target.find_memory_region_kind(segment.physical_address, segment.memory_size) != .ram)
-            return error.SegmentNotIn_RAM;
-        total_size += segment.memory_size;
+    const result = all_ram_or_all_flash_or_neither(target, elf_info);
+    if (!result.all_ram and !result.all_flash and maybe_run_method == null) {
+        return error.RunMethodRequired;
     }
 
-    try progress.step(.{
-        .name = "Copying image",
-        .completed = 0,
-        .total = total_size,
-    });
-    defer progress.end();
-
-    var completed: u64 = 0;
-    for (elf_info.load_segments.items) |segment| {
-        const data = try allocator.alloc(u8, segment.memory_size);
-        defer allocator.free(data);
-
-        try elf_file_reader.seekTo(segment.file_offset);
-        try elf_file_reader.interface.readSliceAll(data[0..segment.file_size]);
-        @memset(data[segment.file_size..], 0);
-
-        try target.write_memory(segment.physical_address, data);
-
-        completed += segment.memory_size;
-        try progress.step(.{
-            .name = "Copying image",
-            .completed = completed,
-            .total = total_size,
-        });
+    if (!result.all_ram) {
+        try load_flash_segments(allocator, target, elf_info, elf_file_reader, maybe_progress);
+    }
+    if (!result.all_flash) {
+        try load_ram_segments(allocator, target, elf_info, elf_file_reader, maybe_progress);
     }
 
-    try target.write_register(.boot, .instruction_pointer, elf_info.header.entry);
-    try target.run(.boot);
+    // TODO: should we call system reset afterwards?
+    if (maybe_run_method) |run_method| switch (run_method) {
+        .reboot => try target.reset(.all),
+        .call_entry => {
+            try target.write_register(.boot, .instruction_pointer, elf_info.header.entry);
+            try target.run(.boot);
+        },
+    } else if (result.all_flash) {
+        try target.reset(.all);
+    } else if (result.all_ram) {
+        try target.write_register(.boot, .instruction_pointer, elf_info.header.entry);
+        try target.run(.boot);
+    } else unreachable; // condition moved before flashing
 }
 
-pub fn load_elf(
+fn load_flash_segments(
     allocator: std.mem.Allocator,
     target: *Target,
     elf_info: elf.Info,
@@ -65,7 +61,68 @@ pub fn load_elf(
     const output = try loader.bake(allocator, stub_flasher.page_size, stub_flasher.ideal_transfer_size);
     defer output.deinit(allocator);
 
-    try output.load(stub_flasher, maybe_progress);
+    if (maybe_progress) |progress| try progress.begin("Flashing", output.addrs.len * output.chunk_size);
+    defer if (maybe_progress) |progress| progress.end();
+
+    try stub_flasher.begin();
+
+    for (output.addrs, 0..) |addr, i| {
+        try stub_flasher.load(addr, output.data[i * output.chunk_size ..][0..output.chunk_size]);
+        if (maybe_progress) |progress| try progress.increment(output.chunk_size);
+    }
+
+    try stub_flasher.end();
+}
+
+fn load_ram_segments(
+    allocator: std.mem.Allocator,
+    target: *Target,
+    elf_info: elf.Info,
+    elf_file_reader: *std.fs.File.Reader,
+    maybe_progress: ?Progress,
+) !void {
+    if (maybe_progress) |progress| {
+        var length: usize = 0;
+        for (elf_info.load_segments.items) |elf_seg| {
+            if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.memory_size) != .ram)
+                continue;
+            length += elf_seg.file_size;
+        }
+        try progress.begin("Writing RAM", length);
+    }
+    defer if (maybe_progress) |progress| progress.end();
+
+    for (elf_info.load_segments.items) |elf_seg| {
+        if (elf_seg.file_size == 0) continue;
+        if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.memory_size) != .ram)
+            continue;
+
+        const data = try allocator.alloc(u8, elf_seg.memory_size);
+        defer allocator.free(data);
+        try elf_file_reader.seekTo(elf_seg.file_offset);
+        try elf_file_reader.interface.readSliceAll(data);
+
+        try target.write_memory(elf_seg.physical_address, data);
+
+        if (maybe_progress) |progress| try progress.increment(elf_seg.file_size);
+    }
+}
+
+fn all_ram_or_all_flash_or_neither(target: *Target, elf_info: elf.Info) struct { all_ram: bool, all_flash: bool } {
+    var all_flash = true;
+    var all_ram = true;
+
+    for (elf_info.load_segments.items) |elf_seg| {
+        if (elf_seg.file_size == 0) continue;
+        if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.memory_size)) |region_kind| {
+            switch (region_kind) {
+                .flash => all_ram = false,
+                .ram => all_flash = false,
+            }
+        }
+    }
+
+    return .{ .all_flash = all_flash, .all_ram = all_ram };
 }
 
 pub const Loader = struct {
@@ -90,17 +147,14 @@ pub const Loader = struct {
         errdefer for (new_segments.items) |segment| allocator.free(segment.data);
 
         for (elf_info.load_segments.items) |elf_seg| {
-            if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.file_size) != .flash) {
-                std.log.warn("found non flash segment", .{});
+            if (elf_seg.file_size == 0) continue;
+            if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.file_size) != .flash)
                 continue;
-            }
 
-            const data = try allocator.alloc(u8, elf_seg.memory_size);
+            const data = try allocator.alloc(u8, elf_seg.file_size);
             errdefer allocator.free(data);
-
             try elf_file_reader.seekTo(elf_seg.file_offset);
-            try elf_file_reader.interface.readSliceAll(data[0..elf_seg.file_size]);
-            @memset(data[elf_seg.file_size..], 0);
+            try elf_file_reader.interface.readSliceAll(data);
 
             const segment: Segment = .{
                 .addr = elf_seg.physical_address,
@@ -228,33 +282,6 @@ pub const Output = struct {
     pub fn deinit(output: Output, allocator: std.mem.Allocator) void {
         allocator.free(output.data);
         allocator.free(output.addrs);
-    }
-
-    pub fn load(output: Output, flasher: anytype, maybe_progress: ?Progress) !void {
-        if (maybe_progress) |progress| {
-            try progress.step(.{
-                .name = "Flashing",
-                .completed = 0,
-                .total = output.addrs.len,
-            });
-        }
-        defer if (maybe_progress) |progress| progress.end();
-
-        try flasher.begin();
-
-        for (output.addrs, 0..) |addr, i| {
-            try flasher.load(addr, output.data[i * output.chunk_size ..][0..output.chunk_size]);
-
-            if (maybe_progress) |progress| {
-                try progress.step(.{
-                    .name = "Flashing",
-                    .completed = i + 1,
-                    .total = output.addrs.len,
-                });
-            }
-        }
-
-        try flasher.end();
     }
 };
 
@@ -511,40 +538,6 @@ pub const StubFlasher = struct {
         }
 
         return null;
-    }
-};
-
-pub const DebugFlasher = struct {
-    page_size: u32 = 4096,
-    ideal_transfer_size: u32 = 4096,
-
-    pub fn begin(_: DebugFlasher) !void {}
-    pub fn end(_: DebugFlasher) !void {}
-
-    pub fn load(flasher: DebugFlasher, addr: u64, data: []const u8) !void {
-        try std.debug.assert(std.mem.isAligned(addr, flasher.page_size));
-        try std.debug.assert(std.mem.isAligned(data.len, flasher.page_size));
-        try std.debug.assert(data.len <= flasher.max_chunk_size);
-
-        if (addr != 0x10000000) return;
-
-        std.log.debug("program: addr 0x{x:0>8} length 0x{x:0>8}", .{ addr, data.len });
-        var it = std.mem.window(u8, data, 4 * 8, 4 * 8);
-        var offset: u32 = 0;
-        while (it.next()) |bytes| {
-            std.debug.print("0x{x:0>8}: 0x{x:0>8} 0x{x:0>8} 0x{x:0>8} 0x{x:0>8} 0x{x:0>8} 0x{x:0>8} 0x{x:0>8} 0x{x:0>8}\n", .{
-                addr + offset,
-                std.mem.readInt(u32, bytes[0..][0..4], .little),
-                std.mem.readInt(u32, bytes[4..][0..4], .little),
-                std.mem.readInt(u32, bytes[8..][0..4], .little),
-                std.mem.readInt(u32, bytes[12..][0..4], .little),
-                std.mem.readInt(u32, bytes[16..][0..4], .little),
-                std.mem.readInt(u32, bytes[20..][0..4], .little),
-                std.mem.readInt(u32, bytes[24..][0..4], .little),
-                std.mem.readInt(u32, bytes[28..][0..4], .little),
-            });
-            offset += 4 * 8;
-        }
     }
 };
 
