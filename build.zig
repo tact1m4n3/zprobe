@@ -1,6 +1,35 @@
 const std = @import("std");
 const microzig = @import("microzig");
 
+const probe = @import("src/probe.zig");
+const chip = @import("src/chip.zig");
+
+pub const LoadOptions = struct {
+    elf_file: std.Build.LazyPath,
+    speed: probe.Speed = .mhz(10),
+    chip: chip.Tag,
+    rtt: bool = false,
+};
+
+pub fn load(dep: *std.Build.Dependency, options: LoadOptions) *std.Build.Step {
+    std.debug.assert(@intFromEnum(options.speed) >= 1000); // speed must be greater than 1KHz
+
+    const b = dep.builder;
+    const exe = dep.artifact("zprobe");
+    const run = b.addRunArtifact(exe);
+    run.addArgs(&.{
+        "load",
+        "--chip",
+        @tagName(options.chip),
+        "--speed",
+        b.fmt("{f}", .{options.speed}),
+    });
+    if (options.rtt) run.addArg("--rtt");
+    run.addFileArg(options.elf_file);
+
+    return &run.step;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
