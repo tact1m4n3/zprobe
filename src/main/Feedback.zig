@@ -121,7 +121,7 @@ pub fn update(feedback: *Feedback, text: []const u8) !void {
     feedback.cond.signal();
 }
 
-pub fn reset(feedback: *Feedback) void {
+pub fn reset(feedback: *Feedback) !void {
     try signal.were_we_interrupted();
 
     feedback.mutex.lock();

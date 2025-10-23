@@ -29,7 +29,7 @@ pub fn run_ram_image(
     var completed: u64 = 0;
     for (elf_info.load_segments.items) |segment| {
         const data = try allocator.alloc(u8, segment.memory_size);
-        errdefer allocator.free(data);
+        defer allocator.free(data);
 
         try elf_file_reader.seekTo(segment.file_offset);
         try elf_file_reader.interface.readSliceAll(data[0..segment.file_size]);
@@ -40,7 +40,7 @@ pub fn run_ram_image(
         completed += segment.memory_size;
         try progress.step(.{
             .name = "Copying image",
-            .completed = 0,
+            .completed = completed,
             .total = total_size,
         });
     }

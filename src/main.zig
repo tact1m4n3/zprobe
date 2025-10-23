@@ -130,6 +130,11 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
         try feedback.update("Initializing RTT host");
         var rtt_host: zprobe.RTT_Host = try .init(allocator, target, .{
             .progress = feedback.progress(),
+            .location_hint = .{ .with_elf = .{
+                .elf_info = elf_info,
+                .elf_file_reader = &elf_file_reader,
+                .method = .auto,
+            } },
         });
         defer rtt_host.deinit(allocator);
 
