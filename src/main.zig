@@ -7,7 +7,7 @@ const Feedback = @import("main/Feedback.zig");
 const signal = @import("main/signal.zig");
 
 pub const std_options: std.Options = .{
-    .log_level = .err,
+    .logFn = Feedback.log_fn,
 };
 
 pub fn main() !void {
@@ -25,10 +25,10 @@ pub fn main() !void {
 
         try signal.init();
 
-        var feedback: Feedback = .init(&stderr_writer.interface, .elegant);
+        var feedback: *Feedback = .init(&stderr_writer.interface, .elegant);
         defer feedback.deinit();
 
-        main_impl(allocator, &feedback, command) catch |err| {
+        main_impl(allocator, feedback, command) catch |err| {
             feedback.fail();
             return err;
         };
@@ -121,7 +121,6 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
 
     zprobe.flash.load_elf(allocator, target, elf_info, &elf_file_reader, args.run_method, feedback.progress()) catch |err| switch (err) {
         error.RunMethodRequired => {
-            // TODO: Feedback: Provide custom log
             std.log.err("Please specify how you want the image to be ran with the `--run_method` option. Your elf contains segments in both flash and ram.", .{});
             return err;
         },

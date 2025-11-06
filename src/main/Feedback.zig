@@ -7,6 +7,18 @@ const signal = @import("signal.zig");
 
 const Feedback = @This();
 
+var instance: ?Feedback = null;
+
+pub fn log_fn(
+    comptime message_level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const feedback = if (instance) |*feedback| feedback else return;
+    feedback.do_log(message_level, scope, format, args) catch {};
+}
+
 writer: *std.Io.Writer,
 config: Config,
 thread: ?std.Thread = null,
@@ -58,15 +70,18 @@ const Task = struct {
     completed: usize = 0,
 };
 
-pub fn init(writer: *std.Io.Writer, config: Config) Feedback {
-    return .{
+pub fn init(writer: *std.Io.Writer, config: Config) *Feedback {
+    std.debug.assert(instance == null);
+    instance = .{
         .writer = writer,
         .config = config,
     };
+    return if (instance) |*feedback| feedback else unreachable;
 }
 
 pub fn deinit(feedback: *Feedback) void {
     feedback.end() catch {};
+    instance = null;
 }
 
 pub fn progress(feedback: *Feedback) Progress {
@@ -286,6 +301,29 @@ fn write_symbol(writer: *std.Io.Writer, symbol: u21, repeat: usize, maybe_color:
         try writer.writeAll(buf[0..count]);
     }
     if (maybe_color != null) try ansi_term.reset_color(writer);
+}
+
+fn do_log(
+    feedback: *Feedback,
+    comptime message_level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) !void {
+    try ansi_term.clear_line(feedback.writer);
+    try ansi_term.set_cursor_column(feedback.writer, 0);
+    try ansi_term.write_color(feedback.writer, .magenta);
+    try feedback.writer.writeAll("(" ++ @tagName(scope) ++ ") ");
+    try ansi_term.write_color(feedback.writer, switch (message_level) {
+        .debug => .blue,
+        .info => .green,
+        .warn => .yellow,
+        .err => .red,
+    });
+    try feedback.writer.writeAll(message_level.asText());
+    try ansi_term.reset_color(feedback.writer);
+    try feedback.writer.print(": " ++ format ++ "\n", args);
+    try feedback.writer.flush();
 }
 
 pub const ansi_term = struct {
