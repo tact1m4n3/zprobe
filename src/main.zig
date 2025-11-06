@@ -25,7 +25,7 @@ pub fn main() !void {
 
         try signal.init();
 
-        var feedback: Feedback = try .init(&stderr_writer.interface, .elegant);
+        var feedback: Feedback = .init(&stderr_writer.interface, .elegant);
         defer feedback.deinit();
 
         main_impl(allocator, &feedback, command) catch |err| {
@@ -94,7 +94,7 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
     defer any_probe.detach();
 
     try feedback.update("Initializing target");
-    var rp2040: zprobe.chip.Any = switch (args.chip) {
+    var chip: zprobe.chip.Any = switch (args.chip) {
         // Chips that take in arm debug interface
         inline .RP2040 => |tag| @unionInit(
             zprobe.chip.Any,
@@ -102,8 +102,8 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
             try .init(any_probe.arm_debug_interface() orelse return error.No_ARM_DebugInterface),
         ),
     };
-    defer rp2040.deinit();
-    const target = rp2040.target();
+    defer chip.deinit();
+    const target = chip.target();
 
     try feedback.update("Reading ELF");
     const elf_file = try std.fs.cwd().openFile(args.elf_file, .{});
@@ -148,7 +148,7 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
         while (!signal.should_exit) {
             const n = try rtt_host.read(target, 0, &buf);
             try writer.interface.writeAll(buf[0..n]);
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
         }
     }
 }

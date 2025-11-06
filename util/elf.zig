@@ -42,7 +42,6 @@ pub const Info = struct {
         const string_table = blk: {
             var shdr: std.elf.Elf64_Shdr = undefined;
             if (format == .@"32") {
-                // var shdr32: std.elf.Elf32_Shdr = undefined;
                 const offset = header.shoff + @sizeOf(std.elf.Elf32_Shdr) * header.shstrndx;
                 try file_reader.seekTo(offset);
                 const shdr32 = try file_reader.interface.takeStruct(std.elf.Elf32_Shdr, header.endian);
@@ -115,35 +114,47 @@ pub const Info = struct {
         };
     }
 
-    pub fn deinit(self: *Info, allocator: std.mem.Allocator) void {
-        self.sections.deinit(allocator);
-        self.load_segments.deinit(allocator);
-        allocator.free(self.string_table);
+    pub fn deinit(info: *Info, allocator: std.mem.Allocator) void {
+        info.sections.deinit(allocator);
+        info.load_segments.deinit(allocator);
+        allocator.free(info.string_table);
+    }
+
+    pub fn get_symbol(info: Info, reader: *std.fs.File.Reader, name: []const u8) !?std.elf.Elf64_Sym {
+        const symbol_section = info.sections.get(".symtab") orelse return error.NoSymbolTable;
+        const name_section = info.sections.get(".strtab") orelse return error.NoSymbolStringTable;
+
+        var symbol_section_offset: usize = 0;
+        while (symbol_section_offset < symbol_section.size) {
+            try reader.seekTo(symbol_section.file_offset + symbol_section_offset);
+            var sym: std.elf.Elf64_Sym = undefined;
+            switch (info.format) {
+                .@"32" => {
+                    const sym_32 = try reader.interface.takeStruct(std.elf.Elf32_Sym, info.header.endian);
+                    symbol_section_offset += @sizeOf(std.elf.Elf32_Sym);
+                    sym = .{
+                        .st_name = sym_32.st_name,
+                        .st_info = sym_32.st_info,
+                        .st_other = sym_32.st_other,
+                        .st_shndx = sym_32.st_shndx,
+                        .st_value = sym_32.st_value,
+                        .st_size = sym_32.st_size,
+                    };
+                },
+                .@"64" => {
+                    sym = try reader.interface.takeStruct(std.elf.Elf64_Sym, info.header.endian);
+                    symbol_section_offset += @sizeOf(std.elf.Elf64_Sym);
+                },
+            }
+
+            try reader.seekTo(name_section.file_offset + sym.st_name);
+            const current_name = reader.interface.takeSentinel(0) catch |err| switch (err) {
+                error.StreamTooLong => continue,
+                else => return err,
+            };
+            if (std.mem.eql(u8, name, current_name)) {
+                return sym;
+            }
+        } else return null;
     }
 };
-
-pub fn get_symbol(reader: *std.fs.File.Reader, info: Info, name: []const u8) !?std.elf.Elf64_Sym {
-    const symbol_section = info.sections.get(".symtab") orelse return error.NoSymbolTable;
-    try reader.seekTo(symbol_section.file_offset);
-    while (reader.pos < symbol_section.file_offset + symbol_section.size) {
-        const sym: std.elf.Elf64_Sym = switch (info.format) {
-            .@"32" => blk: {
-                const sym_32 = try reader.interface.takeStruct(std.elf.Elf32_Sym, info.header.endian);
-                break :blk .{
-                    .st_name = sym_32.st_name,
-                    .st_info = sym_32.st_info,
-                    .st_other = sym_32.st_other,
-                    .st_shndx = sym_32.st_shndx,
-                    .st_value = sym_32.st_value,
-                    .st_size = sym_32.st_size,
-                };
-            },
-            .@"64" => try reader.interface.takeStruct(std.elf.Elf64_Sym, info.header.endian),
-        };
-
-        const current_name = std.mem.span(@as([*:0]const u8, @ptrCast(info.string_table[sym.st_name..])));
-        if (std.mem.eql(u8, name, current_name)) {
-            return sym;
-        }
-    } else return null;
-}

@@ -1,9 +1,12 @@
 const std = @import("std");
 
+const elf = @import("util").elf;
+const flash_algorithm = @import("flash_algorithm");
+pub const Algorithm = flash_algorithm.Algorithm;
+
 const Progress = @import("Progress.zig");
 const Timeout = @import("Timeout.zig");
 const Target = @import("Target.zig");
-const elf = @import("elf.zig");
 
 pub const RunMethod = enum {
     reboot,
@@ -18,17 +21,27 @@ pub fn load_elf(
     maybe_run_method: ?RunMethod,
     maybe_progress: ?Progress,
 ) !void {
-    const result = all_ram_or_all_flash_or_neither(target, elf_info);
-    if (!result.all_ram and !result.all_flash and maybe_run_method == null) {
+    var flash_only = true;
+    var ram_only = true;
+
+    for (elf_info.load_segments.items) |elf_seg| {
+        if (elf_seg.file_size == 0) continue;
+        if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.memory_size)) |region_kind| {
+            switch (region_kind) {
+                .flash => ram_only = false,
+                .ram => flash_only = false,
+            }
+        }
+    }
+
+    if (!flash_only and !ram_only and maybe_run_method == null) {
         return error.RunMethodRequired;
     }
 
-    if (!result.all_ram) {
-        try load_flash_segments(allocator, target, elf_info, elf_file_reader, maybe_progress);
-    }
-    if (!result.all_flash) {
-        try load_ram_segments(allocator, target, elf_info, elf_file_reader, maybe_progress);
-    }
+    var loader: Loader = .{};
+    defer loader.deinit(allocator);
+    try loader.add_elf(allocator, elf_info, elf_file_reader);
+    try loader.load(allocator, target, maybe_progress, ram_only);
 
     // TODO: should we call system reset afterwards?
     if (maybe_run_method) |run_method| switch (run_method) {
@@ -37,96 +50,38 @@ pub fn load_elf(
             try target.write_register(.boot, .instruction_pointer, elf_info.header.entry);
             try target.run(.boot);
         },
-    } else if (result.all_flash) {
+    } else if (flash_only) {
         try target.reset(.all);
-    } else if (result.all_ram) {
+    } else if (ram_only) {
         try target.write_register(.boot, .instruction_pointer, elf_info.header.entry);
         try target.run(.boot);
-    } else unreachable; // condition moved before flashing
-}
-
-fn load_flash_segments(
-    allocator: std.mem.Allocator,
-    target: *Target,
-    elf_info: elf.Info,
-    elf_file_reader: *std.fs.File.Reader,
-    maybe_progress: ?Progress,
-) !void {
-    const stub_flasher: StubFlasher = try .init(target);
-
-    var loader: Loader = .{};
-    defer loader.deinit(allocator);
-    try loader.add_elf(allocator, target, elf_info, elf_file_reader);
-
-    const output = try loader.bake(allocator, stub_flasher.page_size, stub_flasher.ideal_transfer_size);
-    defer output.deinit(allocator);
-
-    if (maybe_progress) |progress| try progress.begin("Flashing", output.addrs.len * output.chunk_size);
-    defer if (maybe_progress) |progress| progress.end();
-
-    try stub_flasher.begin();
-
-    for (output.addrs, 0..) |addr, i| {
-        try stub_flasher.load(addr, output.data[i * output.chunk_size ..][0..output.chunk_size]);
-        if (maybe_progress) |progress| try progress.increment(output.chunk_size);
-    }
-
-    try stub_flasher.end();
-}
-
-fn load_ram_segments(
-    allocator: std.mem.Allocator,
-    target: *Target,
-    elf_info: elf.Info,
-    elf_file_reader: *std.fs.File.Reader,
-    maybe_progress: ?Progress,
-) !void {
-    if (maybe_progress) |progress| {
-        var length: usize = 0;
-        for (elf_info.load_segments.items) |elf_seg| {
-            if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.memory_size) != .ram)
-                continue;
-            length += elf_seg.file_size;
-        }
-        try progress.begin("Writing RAM", length);
-    }
-    defer if (maybe_progress) |progress| progress.end();
-
-    for (elf_info.load_segments.items) |elf_seg| {
-        if (elf_seg.file_size == 0) continue;
-        if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.memory_size) != .ram)
-            continue;
-
-        const data = try allocator.alloc(u8, elf_seg.memory_size);
-        defer allocator.free(data);
-        try elf_file_reader.seekTo(elf_seg.file_offset);
-        try elf_file_reader.interface.readSliceAll(data);
-
-        try target.write_memory(elf_seg.physical_address, data);
-
-        if (maybe_progress) |progress| try progress.increment(elf_seg.file_size);
-    }
-}
-
-fn all_ram_or_all_flash_or_neither(target: *Target, elf_info: elf.Info) struct { all_ram: bool, all_flash: bool } {
-    var all_flash = true;
-    var all_ram = true;
-
-    for (elf_info.load_segments.items) |elf_seg| {
-        if (elf_seg.file_size == 0) continue;
-        if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.memory_size)) |region_kind| {
-            switch (region_kind) {
-                .flash => all_ram = false,
-                .ram => all_flash = false,
-            }
-        }
-    }
-
-    return .{ .all_flash = all_flash, .all_ram = all_ram };
+    } else unreachable; // branch checked earlier
 }
 
 pub const Loader = struct {
     segments: std.ArrayList(Segment) = .empty,
+
+    pub const Segment = struct {
+        addr: u64,
+        data: []const u8,
+        marked: bool = false,
+        added: bool = false,
+
+        fn is_less(_: void, lhs: @This(), rhs: @This()) bool {
+            return lhs.addr < rhs.addr;
+        }
+
+        fn is_inside_range(segment: Segment, addr: u64, size: u64) bool {
+            return segment.addr < addr + size and segment.addr + segment.data.len > addr;
+        }
+
+        fn is_overlapping_others(segment: Segment, others: []const Segment) !void {
+            for (others) |other_segment| {
+                if (segment.is_inside_range(other_segment.addr, other_segment.data.len))
+                    return error.OverlappingSegment;
+            }
+        }
+    };
 
     pub fn deinit(loader: *Loader, allocator: std.mem.Allocator) void {
         for (loader.segments.items) |segment| {
@@ -138,7 +93,6 @@ pub const Loader = struct {
     pub fn add_elf(
         loader: *Loader,
         allocator: std.mem.Allocator,
-        target: *Target,
         elf_info: elf.Info,
         elf_file_reader: *std.fs.File.Reader,
     ) !void {
@@ -148,8 +102,6 @@ pub const Loader = struct {
 
         for (elf_info.load_segments.items) |elf_seg| {
             if (elf_seg.file_size == 0) continue;
-            if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.file_size) != .flash)
-                continue;
 
             const data = try allocator.alloc(u8, elf_seg.file_size);
             errdefer allocator.free(data);
@@ -160,8 +112,8 @@ pub const Loader = struct {
                 .addr = elf_seg.physical_address,
                 .data = data,
             };
-            try segment.check_overlapping(new_segments.items);
-            try segment.check_overlapping(loader.segments.items);
+            try segment.is_overlapping_others(new_segments.items);
+            try segment.is_overlapping_others(loader.segments.items);
             try new_segments.append(allocator, segment);
         }
 
@@ -172,190 +124,140 @@ pub const Loader = struct {
 
     pub fn add_segments(loader: *Loader, allocator: std.mem.Allocator, new_segments: []const Segment) !void {
         for (new_segments) |segment| {
-            try segment.check_overlapping(loader.segments.items);
+            try segment.is_overlapping_others(loader.segments.items);
         }
         try loader.segments.ensureUnusedCapacity(allocator, new_segments.len);
         loader.segments.appendSliceAssumeCapacity(new_segments);
         std.mem.sort(Segment, loader.segments.items, {}, Segment.is_less);
     }
 
-    pub fn bake(loader: Loader, allocator: std.mem.Allocator, page_size: u64, chunk_size: u64) !Output {
-        var data: std.Io.Writer.Allocating = .init(allocator);
-        defer data.deinit();
+    pub fn load(loader: *Loader, allocator: std.mem.Allocator, target: *Target, maybe_progress: ?Progress, ram_only: bool) !void {
+        if (!ram_only) {
+            for (target.flash_algorithms) |algorithm| {
+                const flasher: Flasher = try .init(allocator, target, &algorithm);
 
-        var addrs: std.ArrayList(u64) = .empty;
-        defer addrs.deinit(allocator);
+                var dirty_pages: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, algorithm.memory_range.size / algorithm.page_size);
+                defer dirty_pages.deinit(allocator);
 
-        const ChunkInfo = struct {
-            addr: u64,
-            end: u64,
-        };
-        var maybe_current_chunk: ?ChunkInfo = null;
+                for (loader.segments.items) |*segment| {
+                    if (segment.added) continue;
+                    if (!segment.is_inside_range(algorithm.memory_range.start, algorithm.memory_range.size)) continue;
+
+                    // TODO: maybe also verify if flash already contains the expected
+                    // segment data. If it does we don't set the dirty bits.
+
+                    const algorithm_offset = segment.addr - algorithm.memory_range.start;
+                    const start_page_index = algorithm_offset / algorithm.page_size;
+                    const end_page_index = (algorithm_offset + segment.data.len) / algorithm.page_size;
+                    dirty_pages.setRangeValue(.{
+                        .start = start_page_index,
+                        .end = end_page_index,
+                    }, true);
+
+                    segment.added = true;
+                    segment.marked = true;
+                }
+
+                const total_dirty_pages = dirty_pages.count();
+
+                // Start erasing
+                {
+                    if (maybe_progress) |progress| try progress.begin("Erasing", total_dirty_pages);
+                    defer if (maybe_progress) |progress| progress.end();
+
+                    try flasher.begin(.erase);
+                    defer flasher.end(.erase) catch {};
+
+                    const page_end_index = (algorithm.memory_range.start + algorithm.memory_range.size) / algorithm.page_size;
+                    var sector_index: usize = 0;
+                    while (sector_index < algorithm.sectors.len) : (sector_index += 1) {
+                        const sector_info = algorithm.sectors[sector_index];
+
+                        const pages_per_sector = sector_info.size / algorithm.page_size;
+                        var index = sector_info.addr / algorithm.page_size;
+
+                        const end_index = if (sector_index < algorithm.sectors.len - 1)
+                            algorithm.sectors[sector_index + 1].addr / algorithm.page_size
+                        else
+                            page_end_index;
+
+                        while (index < end_index) : (index += pages_per_sector) {
+                            // This operation can be done much more efficiently with some custom logic
+                            var should_erase = false;
+                            for (0..pages_per_sector) |i| {
+                                if (index + i < dirty_pages.bit_length and dirty_pages.isSet(index + i)) {
+                                    should_erase = true;
+                                    break;
+                                }
+                            }
+                            if (should_erase) {
+                                const erase_addr = algorithm.memory_range.start + index * algorithm.page_size;
+                                try flasher.erase_sector(erase_addr);
+                                if (maybe_progress) |progress| try progress.increment(pages_per_sector);
+                            }
+                        }
+                    }
+                }
+
+                // Start flashing
+                {
+                    if (maybe_progress) |progress| try progress.begin("Flashing", total_dirty_pages);
+                    defer if (maybe_progress) |progress| progress.end();
+
+                    try flasher.begin(.program);
+                    defer flasher.end(.program) catch {};
+
+                    var buffer: [1024]u8 = undefined;
+                    var prog: Programmer = .init(&flasher, &buffer);
+
+                    for (loader.segments.items) |*segment| {
+                        if (!segment.marked) continue;
+                        try prog.write(segment.addr, segment.data);
+                        if (maybe_progress) |progress| try progress.increment(algorithm.page_size);
+                        segment.marked = false;
+                    }
+                    try prog.flush();
+                }
+            }
+        }
+
+        for (loader.segments.items) |*segment| {
+            if (segment.added) continue;
+            if (target.find_memory_region_kind(segment.addr, segment.data.len)) |kind| {
+                if (kind == .ram) {
+                    try target.write_memory(segment.addr, segment.data);
+                    segment.added = true;
+                }
+            }
+        }
 
         for (loader.segments.items) |segment| {
-            if (maybe_current_chunk) |*current_chunk| {
-                if (segment.addr < current_chunk.addr + chunk_size) {
-                    const splat_length = segment.addr - (current_chunk.addr + current_chunk.end);
-                    try data.writer.splatByteAll(0, splat_length);
-                    current_chunk.end += splat_length;
-                } else {
-                    if (current_chunk.end < chunk_size)
-                        try data.writer.splatByteAll(0, chunk_size - current_chunk.end);
-
-                    try addrs.append(allocator, current_chunk.addr);
-                    maybe_current_chunk = null;
-                }
-            }
-
-            if (maybe_current_chunk == null) {
-                const aligned_addr = std.mem.alignBackward(u64, segment.addr, page_size);
-                const splat_length = segment.addr - aligned_addr;
-                try data.writer.splatByteAll(0, splat_length);
-                maybe_current_chunk = .{
-                    .addr = aligned_addr,
-                    .end = splat_length,
-                };
-            }
-
-            var offset: u64 = 0;
-            while (offset < segment.data.len) {
-                const current_chunk = unwrap_mut_opt(ChunkInfo, &maybe_current_chunk);
-
-                const count = @min(chunk_size - current_chunk.end, segment.data.len - offset);
-
-                try data.writer.writeAll(segment.data[offset..][0..count]);
-                offset += count;
-                current_chunk.end += count;
-
-                if (current_chunk.end == chunk_size) {
-                    try addrs.append(allocator, current_chunk.addr);
-                    maybe_current_chunk = .{
-                        .addr = current_chunk.addr + chunk_size,
-                        .end = 0,
-                    };
-                }
-            }
-        }
-
-        if (maybe_current_chunk) |chunk| {
-            if (chunk.end != 0) {
-                if (chunk.end < chunk_size)
-                    try data.writer.splatByteAll(0, chunk_size - chunk.end);
-                try addrs.append(allocator, chunk.addr);
-            }
-        }
-
-        const data_owned = try data.toOwnedSlice();
-        errdefer allocator.free(data_owned);
-        const addrs_owned = try addrs.toOwnedSlice(allocator);
-        errdefer allocator.free(addrs_owned);
-        return .{
-            .data = data_owned,
-            .addrs = addrs_owned,
-            .chunk_size = chunk_size,
-        };
-    }
-};
-
-pub const Segment = struct {
-    addr: u64,
-    data: []const u8,
-
-    fn is_less(_: void, lhs: @This(), rhs: @This()) bool {
-        return lhs.addr < rhs.addr;
-    }
-
-    fn check_overlapping(segment: Segment, others: []const Segment) !void {
-        for (others) |other_segment| {
-            if (segment.addr < other_segment.addr + other_segment.data.len and
-                segment.addr + segment.data.len > other_segment.addr)
-                return error.OverlappingSegment;
+            if (!segment.added) std.log.warn("Segment at 0x{x} with len 0x{x} ignored", .{ segment.addr, segment.data.len });
         }
     }
 };
 
-pub const Output = struct {
-    data: []const u8,
-    addrs: []const u64,
-    chunk_size: u64,
+pub fn get_algorithm(comptime name: []const u8) Algorithm {
+    const algorithms_bundle: []const Algorithm = @import("flash_algorithms_bundle");
+    for (algorithms_bundle) |alg| {
+        if (std.mem.eql(u8, name, alg.name))
+            return alg;
+    } else @compileError(std.fmt.comptimePrint("Flash algorithm with name {s} not found", .{name}));
+}
 
-    pub fn deinit(output: Output, allocator: std.mem.Allocator) void {
-        allocator.free(output.data);
-        allocator.free(output.addrs);
-    }
-};
+/// Calls flash algorithm function for you.
+pub const Flasher = struct {
+    const stack_size = 8096;
+    const stack_align = 128;
 
-pub const StubFlasher = struct {
     target: *Target,
-    stub: []const u8,
-    format: Format,
-    image_header: ImageHeader64,
-    image_base: u64,
-    page_size: u64,
-    ideal_transfer_size: u64,
-    max_transfer_size: u64,
+    algorithm: *const Algorithm,
+    load_addr: u64,
+    stack_end: u64,
     data_addr: u64,
+    max_data_pages: u64,
 
-    pub const ImageHeader32 = extern struct {
-        pub const MAGIC = 0xBAD_C0FFE;
-
-        magic: u64,
-        page_size: u32,
-        ideal_transfer_size: u32,
-        stack_pointer_offset: u32,
-        return_address_offset: u32,
-        begin_fn_offset: u32,
-        verify_fn_offset: u32,
-        erase_fn_offset: u32,
-        program_fn_offset: u32,
-    };
-
-    pub const ImageHeader64 = extern struct {
-        pub const MAGIC = 0xBAD_BAD_BAD_C00FFE;
-
-        magic: u64,
-        page_size: u64,
-        ideal_transfer_size: u64,
-        stack_pointer_offset: u64,
-        return_address_offset: u64,
-        begin_fn_offset: u64,
-        verify_fn_offset: u64,
-        erase_fn_offset: u64,
-        program_fn_offset: u64,
-    };
-
-    pub const Format = enum {
-        @"32bit",
-        @"64bit",
-    };
-
-    pub fn init(target: *Target) !StubFlasher {
-        const stub: []const u8 = (try get_flash_stub(target.name)) orelse return error.NoStubFound;
-        var header_reader: std.Io.Reader = .fixed(stub);
-
-        // Peek magic to check if the stub is 32bit or 64bit
-        const magic = try header_reader.peekInt(u64, .little);
-
-        // Read header
-        const format: Format, const image_header: ImageHeader64 = switch (magic) {
-            ImageHeader32.MAGIC => blk: {
-                const image_header_32 = try header_reader.takeStruct(ImageHeader32, .little);
-                break :blk .{ .@"32bit", .{
-                    .magic = image_header_32.magic,
-                    .page_size = image_header_32.page_size,
-                    .ideal_transfer_size = image_header_32.ideal_transfer_size,
-                    .stack_pointer_offset = image_header_32.stack_pointer_offset,
-                    .return_address_offset = image_header_32.return_address_offset,
-                    .begin_fn_offset = image_header_32.begin_fn_offset,
-                    .verify_fn_offset = image_header_32.verify_fn_offset,
-                    .erase_fn_offset = image_header_32.erase_fn_offset,
-                    .program_fn_offset = image_header_32.program_fn_offset,
-                } };
-            },
-            ImageHeader64.MAGIC => .{ .@"64bit", try header_reader.takeStruct(ImageHeader64, .little) },
-            else => return error.InvalidMagic,
-        };
-
+    pub fn init(allocator: std.mem.Allocator, target: *Target, alg: *const Algorithm) !Flasher {
         // Find ram to load the stub
         const load_region = ram_search: for (target.memory_map) |region| {
             if (region.kind == .ram) {
@@ -363,218 +265,244 @@ pub const StubFlasher = struct {
             }
         } else return error.NoRamRegion;
 
-        const image_base = load_region.offset;
+        const load_addr = load_region.offset;
 
-        // Calculate where should transfer data start
-        const transfer_data_addr = std.mem.alignForward(
-            u64,
-            load_region.offset + stub.len,
-            image_header.page_size,
-        );
+        const decoder = std.base64.standard.Decoder;
+        const decoded_instructions_max_len = try decoder.calcSizeForSlice(alg.instructions);
+        const decoded_instructions: []u8 = try allocator.alloc(u8, decoded_instructions_max_len);
+        defer allocator.free(decoded_instructions);
+        try decoder.decode(decoded_instructions, alg.instructions);
 
-        if (format == .@"32bit" and transfer_data_addr > std.math.maxInt(u32))
-            return error.NotSupported;
+        // Calculate stack end location
+        const stack_end = std.mem.alignForward(u64, load_addr + decoded_instructions.len + stack_size, stack_align);
 
-        // Calculate how much space is there for chunk data
-        const max_transfer_size = std.mem.alignBackward(
-            u64,
-            load_region.offset + load_region.length,
-            image_header.page_size,
-        ) - transfer_data_addr;
+        // Calculate transfer data start location
+        const data_addr = std.mem.alignForward(u64, stack_end, alg.page_size);
 
-        // If we don't have enough space for the ideal transfer size, return
-        // error
-        if (max_transfer_size < image_header.ideal_transfer_size) {
-            return error.MemoryBufferTooSmall;
-        }
+        // Calculate max transfer data size
+        const max_data_pages = (load_region.offset + load_region.length - data_addr) / alg.page_size;
+
+        // Halt all cores since we are going to modify memory (if any are running)
+        try target.halt(.all);
+
+        // Load stub into ram
+        try target.write_memory(load_addr, decoded_instructions);
 
         return .{
             .target = target,
-            .stub = stub,
-            .format = format,
-            .image_header = image_header,
-            .image_base = image_base,
-            .page_size = image_header.page_size,
-            .ideal_transfer_size = image_header.ideal_transfer_size,
-            .max_transfer_size = max_transfer_size,
-            .data_addr = transfer_data_addr,
+            .algorithm = alg,
+            .load_addr = load_addr,
+            .stack_end = stack_end,
+            .data_addr = data_addr,
+            .max_data_pages = max_data_pages,
         };
     }
 
-    pub fn begin(flasher: StubFlasher) !void {
-        // Halt all cores since we are going to modify memory (if any are running)
-        try flasher.target.halt(.all);
+    pub const Function = flash_algorithm.Function;
 
-        // Load stub into ram
-        try flasher.target.write_memory(flasher.image_base, flasher.stub);
+    pub fn begin(flasher: Flasher, function: Function) !void {
+        try flasher.call_fn(flasher.algorithm.init_fn, &.{
+            flasher.algorithm.memory_range.start,
+            0,
+            @intFromEnum(function),
+        });
+        try flasher.wait(null);
 
-        // Call begin
-        try flasher.target.write_register(.boot, .return_address, flasher.image_base + flasher.image_header.return_address_offset);
-        try flasher.target.write_register(.boot, .instruction_pointer, flasher.image_base + flasher.image_header.begin_fn_offset);
-        try flasher.target.write_register(.boot, .stack_pointer, flasher.image_base + flasher.image_header.stack_pointer_offset);
-        try flasher.target.run(.boot);
-
-        // awaited later
+        const return_value = try flasher.target.read_register(.boot, .return_value);
+        if (return_value != 0) return error.BeginFailed;
     }
 
-    pub fn end(flasher: StubFlasher) !void {
-        try flasher.wait();
+    pub fn end(flasher: Flasher, function: Function) !void {
+        try flasher.call_fn(flasher.algorithm.uninit_fn, &.{
+            @intFromEnum(function),
+        });
+        try flasher.wait(null);
+
+        const return_value = try flasher.target.read_register(.boot, .return_value);
+        if (return_value != 0) return error.EndFailed;
     }
 
-    // TODO: maybe refactor calls to stub function
-    /// Verifies flash content.
-    pub fn verify(flasher: StubFlasher, addr: u64, data: []const u8) !bool {
-        std.debug.assert(std.mem.isAligned(addr, flasher.page_size));
-        std.debug.assert(std.mem.isAligned(data.len, flasher.page_size));
-        std.debug.assert(data.len <= flasher.max_transfer_size);
+    /// Program flash. Address must be aligned to page_size and
+    /// data.len must less than page_size.
+    pub fn program_page(flasher: Flasher, addr: u64, data_addr: u64) !void {
+        try flasher.call_fn(flasher.algorithm.program_page_fn, &.{
+            addr,
+            flasher.algorithm.page_size,
+            data_addr,
+        });
+        try flasher.wait(.program);
 
-        try flasher.wait();
+        const return_value = try flasher.target.read_register(.boot, .return_value);
+        if (return_value != 0) return error.ProgramPageFailed;
+    }
 
-        // If the stub is 32 bit, we don't support 64 bit addresses
-        if (flasher.format == .@"32bit") {
-            if (addr > std.math.maxInt(u32)) return error.NotSupported;
-            if (data.len > std.math.maxInt(u32)) return error.NotSupported;
-        }
+    pub fn erase_sector(flasher: Flasher, addr: u64) !void {
+        try flasher.call_fn(flasher.algorithm.erase_sector_fn, &.{addr});
+        try flasher.wait(.program);
 
-        // Load chunk into memory
+        const return_value = try flasher.target.read_register(.boot, .return_value);
+        if (return_value != 0) return error.EraseSectorFailed;
+    }
+
+    pub fn verify_sector(flasher: Flasher, addr: u64, data: []const u8) !bool {
+        const verify_fn = flasher.algorithm.verify_fn orelse return error.OperationNotSupported;
+
         try flasher.target.write_memory(flasher.data_addr, data);
 
-        // Verify that the flash doesn't already contain the same data
-        try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
-        try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.data_addr);
-        try flasher.target.write_register(.boot, .{ .arg = 2 }, data.len);
-        try flasher.target.write_register(.boot, .return_address, flasher.image_base + flasher.image_header.return_address_offset);
-        try flasher.target.write_register(.boot, .instruction_pointer, flasher.image_base + flasher.image_header.verify_fn_offset);
-        try flasher.target.write_register(.boot, .stack_pointer, flasher.image_base + flasher.image_header.stack_pointer_offset);
-        try flasher.target.run(.boot);
-        try flasher.wait();
+        try flasher.call_fn(verify_fn, &.{
+            addr,
+            data.len,
+            flasher.data_addr,
+        });
+        try flasher.wait(.verify);
 
-        return (try flasher.target.read_register(.boot, .return_value)) & 0xFF == 1;
+        const return_value = try flasher.target.read_register(.boot, .return_value);
+        return return_value == addr + data.len;
     }
 
-    // TODO: maybe refactor calls to stub function
-    /// Erase and then program flash. Address must be aligned to page_size and
-    /// data.len must be a multiple of page_size and less then or equal to the
-    /// max_transfer_size.
-    pub fn load(flasher: StubFlasher, addr: u64, data: []const u8) !void {
-        std.debug.assert(std.mem.isAligned(addr, flasher.page_size));
-        std.debug.assert(std.mem.isAligned(data.len, flasher.page_size));
-        std.debug.assert(data.len <= flasher.max_transfer_size);
-
-        // If the stub is 32 bit, we don't support 64 bit addresses
-        if (flasher.format == .@"32bit") {
-            if (addr > std.math.maxInt(u32)) return error.NotSupported;
-            if (data.len > std.math.maxInt(u32)) return error.NotSupported;
+    fn call_fn(flasher: Flasher, ip: u64, args: []const u64) !void {
+        for (args, 0..) |value, i| {
+            try flasher.target.write_register(.boot, .{ .arg = @intCast(i) }, value);
         }
 
-        try flasher.wait();
-
-        std.log.debug("program: addr 0x{x:0>8} length 0x{x:0>8}", .{ addr, data.len });
-
-        // Load chunk into memory
-        try flasher.target.write_memory(flasher.data_addr, data);
-
-        // Verify that the flash doesn't already contain the same data
-        try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
-        try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.data_addr);
-        try flasher.target.write_register(.boot, .{ .arg = 2 }, data.len);
-        try flasher.target.write_register(.boot, .return_address, flasher.image_base + flasher.image_header.return_address_offset);
-        try flasher.target.write_register(.boot, .instruction_pointer, flasher.image_base + flasher.image_header.verify_fn_offset);
-        try flasher.target.write_register(.boot, .stack_pointer, flasher.image_base + flasher.image_header.stack_pointer_offset);
+        // Return address is always at the beginning
+        try flasher.target.write_register(.boot, .return_address, flasher.load_addr + 1);
+        try flasher.target.write_register(.boot, .instruction_pointer, flasher.load_addr + ip);
+        try flasher.target.write_register(.boot, .stack_pointer, flasher.stack_end);
         try flasher.target.run(.boot);
-        try flasher.wait();
-
-        // If the flash data is identical, return.
-        if ((try flasher.target.read_register(.boot, .return_value)) & 0xFF == 1) {
-            std.log.debug("data identical. return", .{});
-            return;
-        }
-
-        // Erase chunk
-        try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
-        try flasher.target.write_register(.boot, .{ .arg = 1 }, data.len);
-        try flasher.target.write_register(.boot, .return_address, flasher.image_base + flasher.image_header.return_address_offset);
-        try flasher.target.write_register(.boot, .instruction_pointer, flasher.image_base + flasher.image_header.erase_fn_offset);
-        try flasher.target.write_register(.boot, .stack_pointer, flasher.image_base + flasher.image_header.stack_pointer_offset);
-        try flasher.target.run(.boot);
-        try flasher.wait();
-
-        // Program chunk
-        try flasher.target.write_register(.boot, .{ .arg = 0 }, addr);
-        try flasher.target.write_register(.boot, .{ .arg = 1 }, flasher.data_addr);
-        try flasher.target.write_register(.boot, .{ .arg = 2 }, data.len);
-        try flasher.target.write_register(.boot, .return_address, flasher.image_base + flasher.image_header.return_address_offset);
-        try flasher.target.write_register(.boot, .instruction_pointer, flasher.image_base + flasher.image_header.program_fn_offset);
-        try flasher.target.write_register(.boot, .stack_pointer, flasher.image_base + flasher.image_header.stack_pointer_offset);
-        try flasher.target.run(.boot);
-        // try flasher.wait();
-        // awaited later
     }
 
-    fn wait(flasher: StubFlasher) !void {
+    fn wait(flasher: Flasher, maybe_function: ?Function) !void {
+        const timeout_ms = if (maybe_function) |function| switch (function) {
+            .program => flasher.algorithm.program_page_timeout,
+            .erase => flasher.algorithm.erase_sector_timeout,
+            .verify => 5000, // should we also take this?
+        } else 1000;
+
         var timeout: Timeout = try .init(.{
-            .after = 5 * std.time.ns_per_s,
+            .after = timeout_ms * std.time.ns_per_ms,
         });
         while (!try flasher.target.is_halted(.boot)) {
             try timeout.tick();
         }
     }
+};
 
-    const flash_stubs_bundle_tar: []const u8 = @embedFile("flash_stubs_bundle.tar");
+/// Writes ordered but maybe sparse data (in terms of address) to flash.
+pub const Programmer = struct {
+    flasher: *const Flasher,
+    writer: Target.MemoryWriter,
+    current_flash_addr: u64,
 
-    fn get_flash_stub(name: []const u8) !?[]const u8 {
-        var tar_reader: std.Io.Reader = .fixed(flash_stubs_bundle_tar);
+    pub fn init(flasher: *const Flasher, buffer: []u8) Programmer {
+        return .{
+            .flasher = flasher,
+            .writer = .init(flasher.target, buffer, flasher.data_addr),
+            .current_flash_addr = flasher.algorithm.memory_range.start,
+        };
+    }
 
-        var file_name_buffer: [32]u8 = undefined;
-        var it: std.tar.Iterator = .init(&tar_reader, .{
-            .file_name_buffer = &file_name_buffer,
-            .link_name_buffer = &.{},
-        });
+    pub fn write(prog: *Programmer, addr: u64, data: []const u8) !void {
+        const page_size = prog.flasher.algorithm.page_size;
+        std.debug.assert(prog.current_flash_addr <= addr);
+        if (addr >= std.mem.alignForward(u64, prog.current_flash_addr, page_size) + page_size or
+            (prog.writer.offset + data.len) / page_size + 2 >= prog.flasher.max_data_pages)
+        {
+            try prog.flush();
+            prog.current_flash_addr = std.mem.alignBackward(u64, addr, page_size);
+        }
+        try prog.writer.interface.splatByteAll(prog.flasher.algorithm.erased_byte_value, addr - prog.current_flash_addr);
+        try prog.writer.interface.writeAll(data);
+        prog.current_flash_addr += data.len;
+    }
 
-        while (try it.next()) |file| {
-            if (file.kind == .file and std.mem.eql(u8, name, file.name)) {
-                return try tar_reader.take(file.size);
-            }
+    pub fn flush(prog: *Programmer) !void {
+        if (prog.writer.offset == 0) return;
+
+        const page_size = prog.flasher.algorithm.page_size;
+        const aligned_end = std.mem.alignForward(u64, prog.current_flash_addr, page_size);
+        try prog.writer.interface.splatByteAll(prog.flasher.algorithm.erased_byte_value, aligned_end - prog.current_flash_addr);
+        try prog.writer.interface.flush();
+
+        prog.current_flash_addr = aligned_end;
+
+        const ram_addr: u64 = prog.writer.address;
+        const flash_addr: u64 = prog.current_flash_addr - prog.writer.offset;
+        var offset: u64 = 0;
+        while (offset < prog.writer.offset) : (offset += page_size) {
+            try prog.flasher.program_page(flash_addr + offset, ram_addr + offset);
         }
 
-        return null;
+        prog.writer.offset = 0;
     }
 };
 
-test "load_segments" {
-    // zig fmt: off
-    const expected_data: []const u8 = &.{
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00,
-        0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x00,
-        0x01, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x0A,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    };
-    // zig fmt: on
-    const expected_addrs: []const u64 = &.{ 0x00, 0x10 };
-    const chunk_size = 16;
-    const page_size = 8;
-
-    const allocator = std.testing.allocator;
-
-    var loader: Loader = .{};
-    defer loader.deinit(allocator);
-    try loader.add_segments(allocator, &.{
-        .{ .addr = 0x00, .data = try allocator.dupe(u8, &.{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 }) },
-        .{ .addr = 0x08, .data = try allocator.dupe(u8, &.{ 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C }) },
-        .{ .addr = 0x0E, .data = try allocator.dupe(u8, &.{0x0D}) },
-        .{ .addr = 0x10, .data = try allocator.dupe(u8, &.{0x01}) },
-        .{ .addr = 0x13, .data = try allocator.dupe(u8, &.{0x0C}) },
-        .{ .addr = 0x17, .data = try allocator.dupe(u8, &.{0x0A}) },
-    });
-
-    const output = try loader.bake(allocator, chunk_size, page_size);
-    defer output.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, expected_data, output.data);
-    try std.testing.expectEqualSlices(u64, expected_addrs, output.addrs);
-}
-
-fn unwrap_mut_opt(T: type, opt: *?T) *T {
-    if (opt.*) |*value| return value;
-    unreachable;
-}
+// test "load_segments" {
+//     // // zig fmt: off
+//     // const expected_data: []const u8 = &.{
+//     //     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00,
+//     //     0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x00,
+//     //     0x01, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x0A,
+//     //     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+//     // };
+//     // // zig fmt: on
+//     // const expected_addrs: []const u64 = &.{ 0x00, 0x8, 0x10, 0x18 };
+//
+//     const allocator = std.testing.allocator;
+//
+//     var loader: Loader = .{};
+//     defer loader.deinit(allocator);
+//     try loader.add_segments(allocator, &.{
+//         .{ .addr = 0x00, .data = try allocator.dupe(u8, &.{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 }) },
+//         .{ .addr = 0x08, .data = try allocator.dupe(u8, &.{ 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C }) },
+//         .{ .addr = 0x0E, .data = try allocator.dupe(u8, &.{0x0D}) },
+//         .{ .addr = 0x10, .data = try allocator.dupe(u8, &.{0x01}) },
+//         .{ .addr = 0x13, .data = try allocator.dupe(u8, &.{0x0C}) },
+//         .{ .addr = 0x17, .data = try allocator.dupe(u8, &.{0x0A}) },
+//         .{ .addr = 0x100, .data = try allocator.dupe(u8, &.{ 0x0A, 0x0B, 0x0C }) },
+//         .{ .addr = 0x104, .data = try allocator.dupe(u8, &.{0x0A}) },
+//     });
+//
+//     const algorithm: Algorithm = .{
+//         .name = "dummy",
+//         .instructions = "",
+//         .memory_range = .{ .start = 0, .size = 100 },
+//         .init_fn = undefined,
+//         .uninit_fn = undefined,
+//         .program_page_fn = undefined,
+//         .erase_sector_fn = undefined,
+//         .program_page_timeout = 1000,
+//         .erase_sector_timeout = 1000,
+//         .erased_byte_value = 0xFF,
+//         .page_size = 8,
+//         .sectors = &.{.{ .addr = 0, .size = 16 }},
+//     };
+//
+//     var dummy_target: Target = .{
+//         .name = "dummy",
+//         .endian = .little,
+//         .flash_algorithms = &.{
+//             algorithm,
+//         },
+//         .memory_map = &.{
+//             .{ .offset = 0, .length = 0x100, .kind = .flash },
+//             .{ .offset = 0x100, .length = 0x100, .kind = .ram },
+//         },
+//         .valid_cores = .empty,
+//         .vtable = undefined,
+//     };
+//
+//     const plan: Plan = try .init(allocator, &dummy_target, loader.segments.items);
+//     defer plan.deinit(allocator);
+//
+//     for (plan.flash_tasks) |task| {
+//         for (task.addrs) |addr| std.debug.print("{} ", .{addr});
+//         std.debug.print("\n", .{});
+//     }
+//
+//     for (plan.erase_tasks) |task| {
+//         for (task.sectors) |sector| std.debug.print("{}-{} ", .{ sector.addr, sector.size });
+//         std.debug.print("\n", .{});
+//     }
+//     // std.debug.print("{any}\n{any}\n{any}\n", .{plan.flash_tasks, plan.erase_tasks, plan.ram_tasks});
+// }

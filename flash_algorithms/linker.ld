@@ -1,20 +1,24 @@
+PHDRS {
+    text PT_LOAD;
+    note PT_NOTE;
+}
+
 SECTIONS {
     . = 0;
 
     .text : {
-        KEEP(*(.image_header*))
+        KEEP(*(.bkp))
 
-        *(.text*)
+        KEEP(*(.text*))
         *(.ram_text*)
         *(.rodata*)
         *(.data*)
         *(.bss*)
+    } :text
 
-        _stack_start = .;
-        . = ALIGN(32);
-        . += 1024;
-        _stack_end = .;
-    }
+    .meta : {
+        KEEP(*(.meta))
+    } :note
 
     /DISCARD/ : {
         *(.ARM.exidx*)

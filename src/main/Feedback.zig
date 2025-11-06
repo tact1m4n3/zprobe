@@ -58,7 +58,7 @@ const Task = struct {
     completed: usize = 0,
 };
 
-pub fn init(writer: *std.Io.Writer, config: Config) !Feedback {
+pub fn init(writer: *std.Io.Writer, config: Config) Feedback {
     return .{
         .writer = writer,
         .config = config,

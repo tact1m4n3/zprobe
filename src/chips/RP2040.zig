@@ -2,6 +2,7 @@ const std = @import("std");
 
 const ADI = @import("../arch/ARM_DebugInterface.zig");
 const Target = @import("../Target.zig");
+const flash = @import("../flash.zig");
 const cortex_m = ADI.cortex_m;
 const cortex_m_impl = cortex_m.Impl(ADI.Mem_AP);
 
@@ -35,6 +36,13 @@ const target_def: Target = .{
     .memory_map = &.{
         .{ .offset = 0x10000000, .length = 2048 * 1024, .kind = .flash },
         .{ .offset = 0x20000000, .length = 256 * 1024, .kind = .ram },
+    },
+    .flash_algorithms = &.{
+        flash.get_algorithm("RP2040"),
+        // .{
+        //     .name = "RP2040",
+        //     .
+        // },
     },
     .vtable = &.{
         .system_reset = system_reset,

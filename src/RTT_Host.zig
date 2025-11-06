@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Timeout = @import("Timeout.zig");
 const Progress = @import("Progress.zig");
-const elf = @import("elf.zig");
+const elf = @import("util").elf;
 const Target = @import("Target.zig");
 
 const RTT_Host = @This();
@@ -80,7 +80,7 @@ pub fn init(
         // Check if we are reading something valid
         if (channel.flags.must_be_zero != 0) return error.BadChannel;
 
-        var name_buffer: [32]u8 = undefined; // should be enough
+        var name_buffer: [32]u8 = undefined;
         var name_reader: Target.MemoryReader = .init(target, &name_buffer, channel.name_ptr);
         var name_writer: std.Io.Writer.Allocating = .init(name_pool.allocator());
         _ = try name_reader.interface.streamDelimiterEnding(&name_writer.writer, 0);
@@ -193,7 +193,7 @@ fn find_control_block(
                 return find_control_block_in_range(target, section.address, section.size, timeout, maybe_progress);
             },
             .symbol_name => |name| {
-                const symbol = (try elf.get_symbol(with_elf_hint.elf_file_reader, with_elf_hint.elf_info, name)) orelse return null;
+                const symbol = (try with_elf_hint.elf_info.get_symbol(with_elf_hint.elf_file_reader, name)) orelse return null;
                 return find_control_block_in_range(target, symbol.st_value, symbol.st_size, timeout, maybe_progress);
             },
         },
@@ -213,7 +213,6 @@ fn find_control_block_in_range(
     var buf: [chunk_size + extra_size]u8 = @splat(0);
     var offset: u64 = 0;
 
-    // NOTE: we could also statically allocate this
     if (maybe_progress) |progress| try progress.begin("Scanning", size);
     defer if (maybe_progress) |progress| progress.end();
 
@@ -237,6 +236,8 @@ fn find_control_block_in_range(
         }
     } else return null;
 }
+
+// TODO: Io.Reader/Writer interfaces
 
 fn bytes_as_struct(comptime T: type, bytes: []const u8, endian: std.builtin.Endian) T {
     var value: T = undefined;

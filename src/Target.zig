@@ -1,10 +1,8 @@
 const std = @import("std");
 
-pub const Target = @This();
+const flash = @import("flash.zig");
 
-// Using core masks instead of dedicate interfaces is an interesting design
-// choice. It may lead to more efficient code as the riscv debug module
-// supports core masks.
+pub const Target = @This();
 
 name: []const u8,
 endian: std.builtin.Endian,
@@ -12,6 +10,7 @@ valid_cores: CoreMask,
 attached_cores: CoreMask = .empty,
 halted_cores: CoreMask = .empty,
 memory_map: []const MemoryRegion,
+flash_algorithms: []const flash.Algorithm,
 vtable: *const Vtable,
 
 pub const UnsupportedError = error{
@@ -262,7 +261,7 @@ pub const MemoryRegion = struct {
     length: u64,
     kind: Kind,
 
-    pub const Kind = enum {
+    pub const Kind = union(enum) {
         flash,
         ram,
     };
@@ -271,7 +270,8 @@ pub const MemoryRegion = struct {
 pub const MemoryReader = struct {
     interface: std.Io.Reader,
     target: *Target,
-    address: u64 = 0,
+    address: u64,
+    offset: u64 = 0,
 
     pub fn init(target: *Target, buffer: []u8, address: u64) MemoryReader {
         return .{
@@ -296,8 +296,66 @@ pub const MemoryReader = struct {
         const memory_reader: *MemoryReader = @alignCast(@fieldParentPtr("interface", r));
 
         const buf = limit.slice(w.writableSliceGreedy(1) catch return error.ReadFailed);
-        memory_reader.target.read_memory(memory_reader.address, buf) catch return error.ReadFailed;
-        memory_reader.address += buf.len;
+        memory_reader.target.read_memory(memory_reader.address + memory_reader.offset, buf) catch return error.ReadFailed;
+        memory_reader.offset += buf.len;
         return buf.len;
+    }
+};
+
+pub const MemoryWriter = struct {
+    interface: std.Io.Writer,
+    target: *Target,
+    address: u64,
+    offset: u64 = 0,
+
+    pub fn init(target: *Target, buffer: []u8, address: u64) MemoryWriter {
+        return .{
+            .interface = init_interface(buffer),
+            .target = target,
+            .address = address,
+        };
+    }
+
+    pub fn init_interface(buffer: []u8) std.Io.Writer {
+        return .{
+            .buffer = buffer,
+            .end = 0,
+            .vtable = &.{
+                .drain = drain,
+            },
+        };
+    }
+
+    pub fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const memory_writer: *MemoryWriter = @alignCast(@fieldParentPtr("interface", w));
+
+        {
+            const buffered = w.buffered();
+            if (buffered.len > 0) {
+                memory_writer.target.write_memory(memory_writer.address + memory_writer.offset, buffered) catch return error.WriteFailed;
+                memory_writer.offset += buffered.len;
+                _ = w.consumeAll();
+            }
+        }
+
+        var n: usize = 0;
+
+        for (data[0 .. data.len - 1]) |buf| {
+            if (buf.len == 0) continue;
+            memory_writer.target.write_memory(memory_writer.address + memory_writer.offset, buf) catch return error.WriteFailed;
+            memory_writer.offset += buf.len;
+            n += buf.len;
+        }
+
+        const splat_buf = data[data.len - 1];
+        if (splat_buf.len > 0 and splat > 0) {
+            for (0..splat) |_| {
+                memory_writer.target.write_memory(memory_writer.address + memory_writer.offset, splat_buf) catch return error.WriteFailed;
+                memory_writer.offset += splat_buf.len;
+                n += splat_buf.len;
+            }
+        }
+
+        return n;
     }
 };
