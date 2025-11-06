@@ -207,13 +207,13 @@ pub const Loader = struct {
                     try flasher.begin(.program);
                     defer flasher.end(.program) catch {};
 
-                    var buffer: [1024]u8 = undefined;
-                    var prog: Programmer = .init(&flasher, &buffer);
+                    // TODO: What makes a good buffer size here?
+                    var buffer: [4096]u8 = undefined;
+                    var prog: Programmer = .init(&flasher, maybe_progress, &buffer);
 
                     for (loader.segments.items) |*segment| {
                         if (!segment.marked) continue;
                         try prog.write(segment.addr, segment.data);
-                        if (maybe_progress) |progress| try progress.increment(algorithm.page_size);
                         segment.marked = false;
                     }
                     try prog.flush();
@@ -391,12 +391,14 @@ pub const Flasher = struct {
 /// Writes ordered but maybe sparse data (in terms of address) to flash.
 pub const Programmer = struct {
     flasher: *const Flasher,
+    maybe_progress: ?Progress,
     writer: Target.MemoryWriter,
     current_flash_addr: u64,
 
-    pub fn init(flasher: *const Flasher, buffer: []u8) Programmer {
+    pub fn init(flasher: *const Flasher, maybe_progress: ?Progress, buffer: []u8) Programmer {
         return .{
             .flasher = flasher,
+            .maybe_progress = maybe_progress,
             .writer = .init(flasher.target, buffer, flasher.data_addr),
             .current_flash_addr = flasher.algorithm.memory_range.start,
         };
@@ -431,6 +433,7 @@ pub const Programmer = struct {
         var offset: u64 = 0;
         while (offset < prog.writer.offset) : (offset += page_size) {
             try prog.flasher.program_page(flash_addr + offset, ram_addr + offset);
+            if (prog.maybe_progress) |progress| try progress.increment(1);
         }
 
         prog.writer.offset = 0;
