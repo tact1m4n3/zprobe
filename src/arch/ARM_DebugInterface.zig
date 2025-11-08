@@ -5,7 +5,7 @@ const ARM_DebugInterface = @This();
 const Timeout = @import("../Timeout.zig");
 
 pub const Mem_AP = @import("ARM_DebugInterface/Mem_AP.zig");
-pub const cortex_m = @import("ARM_DebugInterface/cortex_m.zig");
+pub const Cortex_M = @import("ARM_DebugInterface/Cortex_M.zig");
 
 allocator: std.mem.Allocator,
 

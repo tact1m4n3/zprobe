@@ -70,7 +70,7 @@ pub fn init(
     errdefer down_channels.deinit(allocator);
 
     var buffer: [@sizeOf(Channel)]u8 = undefined;
-    var reader: Target.MemoryReader = .init(target, &buffer, channels_start);
+    var reader: Target.Memory.Reader = .init(target.memory, &buffer, channels_start);
 
     var name_pool: std.heap.ArenaAllocator = .init(allocator);
 
@@ -81,7 +81,7 @@ pub fn init(
         if (channel.flags.must_be_zero != 0) return error.BadChannel;
 
         var name_buffer: [32]u8 = undefined;
-        var name_reader: Target.MemoryReader = .init(target, &name_buffer, channel.name_ptr);
+        var name_reader: Target.Memory.Reader = .init(target.memory, &name_buffer, channel.name_ptr);
         var name_writer: std.Io.Writer.Allocating = .init(name_pool.allocator());
         _ = try name_reader.interface.streamDelimiterEnding(&name_writer.writer, 0);
 
@@ -113,7 +113,7 @@ pub fn read(rtt_host: RTT_Host, target: *Target, index: usize, buffer: []u8) !us
 
     const channel_address = rtt_host.control_block_address + @sizeOf(Header) + index * @sizeOf(Channel);
     var channel_buffer: [@sizeOf(Channel)]u8 = undefined;
-    var reader: Target.MemoryReader = .init(target, &channel_buffer, channel_address);
+    var reader: Target.Memory.Reader = .init(target.memory, &channel_buffer, channel_address);
     const channel = try reader.interface.takeStruct(Channel, target.endian);
 
     const first_count_available, const second_count_available = if (channel.read_offset < channel.write_offset)
@@ -125,12 +125,12 @@ pub fn read(rtt_host: RTT_Host, target: *Target, index: usize, buffer: []u8) !us
 
     const first_count = @min(first_count_available, buffer.len);
     const second_count = @min(second_count_available, buffer.len - first_count);
-    if (first_count > 0) try target.read_memory(channel.buffer_ptr + channel.read_offset, buffer[0..first_count]);
-    if (second_count > 0) try target.read_memory(channel.buffer_ptr + first_count, buffer[first_count..][0..second_count]);
+    if (first_count > 0) try target.memory.read(channel.buffer_ptr + channel.read_offset, buffer[0..first_count]);
+    if (second_count > 0) try target.memory.read(channel.buffer_ptr + first_count, buffer[first_count..][0..second_count]);
 
     var read_offset_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &read_offset_buf, (channel.read_offset + first_count + second_count) % channel.size, target.endian);
-    try target.write_memory(channel_address + @offsetOf(Channel, "read_offset"), &read_offset_buf);
+    try target.memory.write(channel_address + @offsetOf(Channel, "read_offset"), &read_offset_buf);
     return first_count + second_count;
 }
 
@@ -224,7 +224,7 @@ fn find_control_block_in_range(
 
         @memcpy(buf[0..extra_size], buf[chunk_size..]); // can't overlap
 
-        try target.read_memory(start + offset, buf[extra_size..]);
+        try target.memory.read(start + offset, buf[extra_size..]);
         if (std.mem.indexOf(u8, &buf, "SEGGER RTT")) |position| {
             const address = start + offset + position - extra_size;
             const header: Header = bytes_as_struct(Header, buf[position..][0..@sizeOf(Header)], target.endian);

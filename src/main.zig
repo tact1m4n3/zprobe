@@ -94,16 +94,10 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
     defer any_probe.detach();
 
     try feedback.update("Initializing target");
-    var chip: zprobe.chip.Any = switch (args.chip) {
-        // Chips that take in arm debug interface
-        inline .RP2040 => |tag| @unionInit(
-            zprobe.chip.Any,
-            @tagName(tag),
-            try .init(any_probe.arm_debug_interface() orelse return error.No_ARM_DebugInterface),
-        ),
-    };
+    var chip: zprobe.chip.RP2040 = undefined;
+    try chip.init(any_probe.arm_debug_interface() orelse return error.No_ARM_DebugInterface);
     defer chip.deinit();
-    const target = chip.target();
+    const target = &chip.target;
 
     try feedback.update("Reading ELF");
     const elf_file = try std.fs.cwd().openFile(args.elf_file, .{});

@@ -3,8 +3,6 @@ const std = @import("std");
 const ADI = @import("../arch/ARM_DebugInterface.zig");
 const Target = @import("../Target.zig");
 const flash = @import("../flash.zig");
-const cortex_m = ADI.cortex_m;
-const cortex_m_impl = cortex_m.Impl(ADI.Mem_AP);
 
 const RP2040 = @This();
 
@@ -27,47 +25,48 @@ const RESCUE_DP: ADI.DP_Address = .{ .multidrop = 0xf1002927 };
 adi: *ADI,
 core0_ap: ADI.Mem_AP,
 core1_ap: ADI.Mem_AP,
+cores: ADI.Cortex_M.System(&.{
+    CORE0_ID,
+    CORE1_ID,
+}),
 target: Target,
 
-const target_def: Target = .{
-    .name = "RP2040",
-    .endian = .little,
-    .valid_cores = .with_ids(&.{ CORE0_ID, CORE1_ID }),
-    .memory_map = &.{
-        .{ .offset = 0x10000000, .length = 2048 * 1024, .kind = .flash },
-        .{ .offset = 0x20000000, .length = 256 * 1024, .kind = .ram },
-    },
-    .flash_algorithms = &.{
-        flash.get_algorithm("RP2040"),
-        // .{
-        //     .name = "RP2040",
-        //     .
-        // },
-    },
-    .vtable = &.{
-        .system_reset = system_reset,
-        .memory = ADI.Mem_AP.target_memory_vtable(@This(), "target", "core0_ap"),
-        .core_access = cortex_m.TargetCoreAccess(@This(), "target", &.{
-            .{ .id = CORE0_ID, .memory_name = "core0_ap" },
-            .{ .id = CORE1_ID, .memory_name = "core1_ap" },
-        }).vtable(),
-    },
-};
+pub fn init(rp2040: *RP2040, adi: *ADI) !void {
+    rp2040.adi = adi;
+    rp2040.core0_ap = try .init(adi, AP_CORE0);
+    rp2040.core1_ap = try .init(adi, AP_CORE1);
 
-pub fn init(adi: *ADI) !RP2040 {
-    const core0_ap: ADI.Mem_AP = try .init(adi, AP_CORE0);
-    const core1_ap: ADI.Mem_AP = try .init(adi, AP_CORE1);
+    rp2040.cores = .init(.{
+        rp2040.core0_ap.memory(),
+        rp2040.core1_ap.memory(),
+    });
 
-    return .{
-        .adi = adi,
-        .core0_ap = core0_ap,
-        .core1_ap = core1_ap,
-        .target = target_def,
+    rp2040.target = .{
+        .name = "RP2040",
+        .endian = .little,
+        .valid_cores = .with_ids(&.{ CORE0_ID, CORE1_ID }),
+        .memory_map = comptime &.{
+            .{ .offset = 0x10000000, .length = 2048 * 1024, .kind = .flash },
+            .{ .offset = 0x20000000, .length = 256 * 1024, .kind = .ram },
+        },
+        .flash_algorithms = comptime &.{
+            flash.get_algorithm("RP2040"),
+        },
+        .memory = rp2040.core0_ap.memory(),
+        .debug = rp2040.cores.debug(),
+        .vtable = comptime &.{
+            .system_reset = system_reset,
+        },
     };
 }
 
 pub fn deinit(rp2040: *RP2040) void {
     rp2040.target.deinit();
+}
+
+fn system_reset(target: *Target) Target.ResetError!void {
+    const rp2040: *RP2040 = @fieldParentPtr("target", target);
+    do_system_reset(rp2040) catch return error.ResetFailed;
 }
 
 fn do_system_reset(rp2040: *RP2040) !void {
@@ -84,9 +83,4 @@ fn do_system_reset(rp2040: *RP2040) !void {
 
     // take the boot core out of rescue mode
     try rp2040.target.halt_reset(.boot);
-}
-
-fn system_reset(target: *Target) Target.CommandError!void {
-    const rp2040: *RP2040 = @fieldParentPtr("target", target);
-    do_system_reset(rp2040) catch return error.CommandFailed;
 }

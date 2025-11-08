@@ -225,7 +225,7 @@ pub const Loader = struct {
             if (segment.added) continue;
             if (target.find_memory_region_kind(segment.addr, segment.data.len)) |kind| {
                 if (kind == .ram) {
-                    try target.write_memory(segment.addr, segment.data);
+                    try target.memory.write(segment.addr, segment.data);
                     segment.added = true;
                 }
             }
@@ -286,7 +286,7 @@ pub const Flasher = struct {
         try target.halt(.all);
 
         // Load stub into ram
-        try target.write_memory(load_addr, decoded_instructions);
+        try target.memory.write(load_addr, decoded_instructions);
 
         return .{
             .target = target,
@@ -392,14 +392,14 @@ pub const Flasher = struct {
 pub const Programmer = struct {
     flasher: *const Flasher,
     maybe_progress: ?Progress,
-    writer: Target.MemoryWriter,
+    writer: Target.Memory.Writer,
     current_flash_addr: u64,
 
     pub fn init(flasher: *const Flasher, maybe_progress: ?Progress, buffer: []u8) Programmer {
         return .{
             .flasher = flasher,
             .maybe_progress = maybe_progress,
-            .writer = .init(flasher.target, buffer, flasher.data_addr),
+            .writer = .init(flasher.target.memory, buffer, flasher.data_addr),
             .current_flash_addr = flasher.algorithm.memory_range.start,
         };
     }
