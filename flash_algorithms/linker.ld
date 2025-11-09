@@ -1,5 +1,5 @@
 PHDRS {
-    text PT_LOAD;
+    load PT_LOAD;
     note PT_NOTE;
 }
 
@@ -7,14 +7,13 @@ SECTIONS {
     . = 0;
 
     .text : {
-        KEEP(*(.bkp))
-
         KEEP(*(.text*))
         *(.ram_text*)
         *(.rodata*)
+        data_section_offset = .;
         *(.data*)
         *(.bss*)
-    } :text
+    } :load
 
     .meta : {
         KEEP(*(.meta))

@@ -45,7 +45,7 @@ fn init_fn(_: usize, _: usize, f: flash_algorithm.Function) callconv(.c) c_int {
 }
 
 fn uninit_fn(_: flash_algorithm.Function) callconv(.c) c_int {
-    return 1;
+    return 0;
 }
 
 fn program_page_fn(addr: usize, size: usize, data: [*]const u8) callconv(.c) c_int {

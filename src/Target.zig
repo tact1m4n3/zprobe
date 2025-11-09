@@ -10,7 +10,8 @@ pub const RegisterId = Debug.RegisterId;
 pub const Target = @This();
 
 name: []const u8,
-endian: std.builtin.Endian,
+endian: std.builtin.Endian = .little,
+arch: Arch,
 valid_cores: CoreMask,
 attached_cores: CoreMask = .empty,
 halted_cores: CoreMask = .empty,
@@ -19,6 +20,13 @@ flash_algorithms: []const flash.Algorithm,
 memory: Memory,
 debug: Debug,
 vtable: *const Vtable,
+
+// TODO: maybe make a tagged union with a custom variant or use a struct with
+// decl literals (I would like to explore the latter one)
+pub const Arch = enum {
+    thumb,
+    riscv32,
+};
 
 pub const ResetError = error{
     ResetFailed,

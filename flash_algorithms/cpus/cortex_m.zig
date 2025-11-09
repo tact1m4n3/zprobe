@@ -20,8 +20,8 @@ pub const interrupt = struct {
 };
 
 pub const startup_logic = struct {
-    pub fn _start() linksection(".bkp") callconv(.c) void {
-        @breakpoint();
+    pub fn _start() callconv(.c) void {
+        unreachable;
     }
 };
 

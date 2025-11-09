@@ -48,6 +48,8 @@ pub fn main() !void {
         const erase_all_fn = if (try elf_info.get_symbol(&input_file_reader, "flash_erase_all")) |sym| sym.st_value else null;
         const verify_fn = if (try elf_info.get_symbol(&input_file_reader, "flash_verify")) |sym| sym.st_value else null;
 
+        const data_section_offset = if (try elf_info.get_symbol(&input_file_reader, "data_section_offset")) |sym| sym.st_value else null;
+
         const metadata_section = elf_info.sections.get(".meta") orelse return error.MetadataSectionNotFound;
         try input_file_reader.seekTo(metadata_section.file_offset);
         const main_metadata = try input_file_reader.interface.takeStruct(flash_algorithm.firmware.Metadata(0), elf_info.header.endian);
@@ -74,7 +76,9 @@ pub fn main() !void {
             .erase_sector_fn = erase_sector_fn,
             .erase_all_fn = erase_all_fn,
             .verify_fn = verify_fn,
+            .data_section_offset = data_section_offset,
             .page_size = main_metadata.page_size,
+            .stack_size = if (main_metadata.stack_size != 0) main_metadata.stack_size else null,
             .erased_byte_value = main_metadata.erased_byte_value,
             .program_page_timeout = main_metadata.program_page_timeout,
             .erase_sector_timeout = main_metadata.erase_sector_timeout,

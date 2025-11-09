@@ -5,8 +5,10 @@ const flash_algorithm = @import("flash_algorithm");
 pub const Algorithm = flash_algorithm.Algorithm;
 
 const Progress = @import("Progress.zig");
-const Timeout = @import("Timeout.zig");
 const Target = @import("Target.zig");
+const Timeout = @import("Timeout.zig");
+
+const log = std.log.scoped(.flash);
 
 pub const RunMethod = enum {
     reboot,
@@ -132,19 +134,18 @@ pub const Loader = struct {
     }
 
     pub fn load(loader: *Loader, allocator: std.mem.Allocator, target: *Target, maybe_progress: ?Progress, ram_only: bool) !void {
-        if (!ram_only) {
+        if (!ram_only) flash: {
             for (target.flash_algorithms) |algorithm| {
                 const flasher: Flasher = try .init(allocator, target, &algorithm);
 
                 var dirty_pages: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, algorithm.memory_range.size / algorithm.page_size);
                 defer dirty_pages.deinit(allocator);
 
+                var total_packed_data: u64 = 0;
+
                 for (loader.segments.items) |*segment| {
                     if (segment.added) continue;
                     if (!segment.is_inside_range(algorithm.memory_range.start, algorithm.memory_range.size)) continue;
-
-                    // TODO: maybe also verify if flash already contains the expected
-                    // segment data. If it does we don't set the dirty bits.
 
                     const algorithm_offset = segment.addr - algorithm.memory_range.start;
                     const start_page_index = algorithm_offset / algorithm.page_size;
@@ -154,9 +155,28 @@ pub const Loader = struct {
                         .end = end_page_index,
                     }, true);
 
+                    total_packed_data += segment.data.len;
+
                     segment.added = true;
                     segment.marked = true;
                 }
+
+                // TODO: maybe make this check optional
+                const should_flash = if (flasher.algorithm.verify_fn != null) blk: {
+                    if (maybe_progress) |progress| try progress.begin("Checking", total_packed_data);
+                    defer if (maybe_progress) |progress| progress.end();
+
+                    try flasher.begin(.verify);
+                    defer flasher.end(.verify) catch {};
+
+                    for (loader.segments.items) |segment| {
+                        if (!segment.marked) continue;
+                        if (!try verify(&flasher, segment.addr, segment.data, maybe_progress))
+                            break :blk true;
+                    }
+                    break :blk false;
+                } else true;
+                if (!should_flash) break :flash;
 
                 const total_dirty_pages = dirty_pages.count();
 
@@ -192,6 +212,7 @@ pub const Loader = struct {
                             }
                             if (should_erase) {
                                 const erase_addr = algorithm.memory_range.start + index * algorithm.page_size;
+                                log.debug("erasing 0x{x}->0x{x}", .{ erase_addr, erase_addr + sector_info.size });
                                 try flasher.erase_sector(erase_addr);
                                 if (maybe_progress) |progress| try progress.increment(pages_per_sector);
                             }
@@ -214,9 +235,28 @@ pub const Loader = struct {
                     for (loader.segments.items) |*segment| {
                         if (!segment.marked) continue;
                         try prog.write(segment.addr, segment.data);
-                        segment.marked = false;
                     }
                     try prog.flush();
+                }
+
+                if (flasher.algorithm.verify_fn != null) {
+                    if (maybe_progress) |progress| try progress.begin("Verify", total_packed_data);
+                    defer if (maybe_progress) |progress| progress.end();
+
+                    try flasher.begin(.verify);
+                    defer flasher.end(.verify) catch {};
+
+                    for (loader.segments.items) |segment| {
+                        if (!segment.marked) continue;
+                        log.debug("verifying 0x{x}->0x{x}", .{ segment.addr, segment.addr + segment.data.len });
+                        if (!try verify(&flasher, segment.addr, segment.data, maybe_progress))
+                            return error.FlashDataMismatch;
+                    }
+                }
+
+                for (loader.segments.items) |*segment| {
+                    if (!segment.marked) continue;
+                    segment.marked = false;
                 }
             }
         }
@@ -232,7 +272,7 @@ pub const Loader = struct {
         }
 
         for (loader.segments.items) |segment| {
-            if (!segment.added) std.log.warn("Segment at 0x{x} with len 0x{x} ignored", .{ segment.addr, segment.data.len });
+            if (!segment.added) log.warn("Segment at 0x{x} with len 0x{x} ignored", .{ segment.addr, segment.data.len });
         }
     }
 };
@@ -247,13 +287,16 @@ pub fn get_algorithm(comptime name: []const u8) Algorithm {
 
 /// Calls flash algorithm function for you.
 pub const Flasher = struct {
-    const stack_size = 8096;
-    const stack_align = 128;
+    const default_stack_size = 1024;
+
+    pub const ARM_BKPT: u32 = 0xBE00_BE00;
 
     target: *Target,
     algorithm: *const Algorithm,
     load_addr: u64,
-    stack_end: u64,
+    code_addr: u64,
+    stack_start_addr: u64,
+    stack_end_addr: u64,
     data_addr: u64,
     max_data_pages: u64,
 
@@ -267,17 +310,34 @@ pub const Flasher = struct {
 
         const load_addr = load_region.offset;
 
+        const header: []const u32 = switch (target.arch) {
+            .thumb => switch (target.endian) {
+                .little => &.{ARM_BKPT},
+                // We convert it to big endian and when written it gets
+                // converted back to little.
+                .big => &.{std.mem.nativeToBig(u32, ARM_BKPT)},
+            },
+            else => @panic("TODO"),
+        };
+        const code_addr = load_addr + header.len * @sizeOf(u32);
+
         const decoder = std.base64.standard.Decoder;
         const decoded_instructions_max_len = try decoder.calcSizeForSlice(alg.instructions);
         const decoded_instructions: []u8 = try allocator.alloc(u8, decoded_instructions_max_len);
         defer allocator.free(decoded_instructions);
         try decoder.decode(decoded_instructions, alg.instructions);
 
-        // Calculate stack end location
-        const stack_end = std.mem.alignForward(u64, load_addr + decoded_instructions.len + stack_size, stack_align);
+        // Calculate stack start and end locations
+        const stack_align: u64 = switch (target.arch) {
+            .thumb => 8,
+            .riscv32 => 16,
+        };
+        const stack_start_addr = code_addr + decoded_instructions.len;
+        const stack_size = alg.stack_size orelse default_stack_size;
+        const stack_end_addr = std.mem.alignForward(u64, stack_start_addr + stack_size, stack_align);
 
         // Calculate transfer data start location
-        const data_addr = std.mem.alignForward(u64, stack_end, alg.page_size);
+        const data_addr = std.mem.alignForward(u64, stack_end_addr, alg.page_size);
 
         // Calculate max transfer data size
         const max_data_pages = (load_region.offset + load_region.length - data_addr) / alg.page_size;
@@ -285,14 +345,19 @@ pub const Flasher = struct {
         // Halt all cores since we are going to modify memory (if any are running)
         try target.halt(.all);
 
+        // Load header
+        try target.memory.write_u32(load_addr, header);
+
         // Load stub into ram
-        try target.memory.write(load_addr, decoded_instructions);
+        try target.memory.write(code_addr, decoded_instructions);
 
         return .{
             .target = target,
             .algorithm = alg,
             .load_addr = load_addr,
-            .stack_end = stack_end,
+            .code_addr = code_addr,
+            .stack_start_addr = stack_start_addr,
+            .stack_end_addr = stack_end_addr,
             .data_addr = data_addr,
             .max_data_pages = max_data_pages,
         };
@@ -305,7 +370,7 @@ pub const Flasher = struct {
             flasher.algorithm.memory_range.start,
             0,
             @intFromEnum(function),
-        });
+        }, true);
         try flasher.wait(null);
 
         const return_value = try flasher.target.read_register(.boot, .return_value);
@@ -315,7 +380,7 @@ pub const Flasher = struct {
     pub fn end(flasher: Flasher, function: Function) !void {
         try flasher.call_fn(flasher.algorithm.uninit_fn, &.{
             @intFromEnum(function),
-        });
+        }, false);
         try flasher.wait(null);
 
         const return_value = try flasher.target.read_register(.boot, .return_value);
@@ -329,7 +394,7 @@ pub const Flasher = struct {
             addr,
             flasher.algorithm.page_size,
             data_addr,
-        });
+        }, false);
         try flasher.wait(.program);
 
         const return_value = try flasher.target.read_register(.boot, .return_value);
@@ -337,47 +402,50 @@ pub const Flasher = struct {
     }
 
     pub fn erase_sector(flasher: Flasher, addr: u64) !void {
-        try flasher.call_fn(flasher.algorithm.erase_sector_fn, &.{addr});
-        try flasher.wait(.program);
+        try flasher.call_fn(flasher.algorithm.erase_sector_fn, &.{addr}, false);
+        try flasher.wait(.erase);
 
         const return_value = try flasher.target.read_register(.boot, .return_value);
         if (return_value != 0) return error.EraseSectorFailed;
     }
 
-    pub fn verify_sector(flasher: Flasher, addr: u64, data: []const u8) !bool {
+    pub fn verify(flasher: Flasher, addr: u64, data_addr: u64, len: u64) !bool {
         const verify_fn = flasher.algorithm.verify_fn orelse return error.OperationNotSupported;
 
-        try flasher.target.write_memory(flasher.data_addr, data);
-
-        try flasher.call_fn(verify_fn, &.{
-            addr,
-            data.len,
-            flasher.data_addr,
-        });
+        try flasher.call_fn(verify_fn, &.{ addr, len, data_addr }, false);
         try flasher.wait(.verify);
 
         const return_value = try flasher.target.read_register(.boot, .return_value);
-        return return_value == addr + data.len;
+        return return_value == addr + len;
     }
 
-    fn call_fn(flasher: Flasher, ip: u64, args: []const u64) !void {
+    fn call_fn(flasher: Flasher, ip: u64, args: []const u64, is_init: bool) !void {
         for (args, 0..) |value, i| {
             try flasher.target.write_register(.boot, .{ .arg = @intCast(i) }, value);
         }
 
         // Return address is always at the beginning
-        try flasher.target.write_register(.boot, .return_address, flasher.load_addr + 1);
-        try flasher.target.write_register(.boot, .instruction_pointer, flasher.load_addr + ip);
-        try flasher.target.write_register(.boot, .stack_pointer, flasher.stack_end);
+        try flasher.target.write_register(.boot, .return_address, switch (flasher.target.arch) {
+            .thumb => flasher.load_addr + 1,
+            else => flasher.load_addr,
+        });
+        try flasher.target.write_register(.boot, .instruction_pointer, flasher.code_addr + ip);
+        if (is_init) {
+            try flasher.target.write_register(.boot, .stack_pointer, flasher.stack_end_addr);
+            if (flasher.algorithm.data_section_offset) |data_section_offset|
+                try flasher.target.write_register(.boot, .static_base, flasher.code_addr + data_section_offset);
+        }
         try flasher.target.run(.boot);
     }
+
+    const DEFAULT_TIMEOUT_MS: usize = 1000;
 
     fn wait(flasher: Flasher, maybe_function: ?Function) !void {
         const timeout_ms = if (maybe_function) |function| switch (function) {
             .program => flasher.algorithm.program_page_timeout,
             .erase => flasher.algorithm.erase_sector_timeout,
-            .verify => 5000, // should we also take this?
-        } else 1000;
+            .verify => DEFAULT_TIMEOUT_MS,
+        } else DEFAULT_TIMEOUT_MS;
 
         var timeout: Timeout = try .init(.{
             .after = timeout_ms * std.time.ns_per_ms,
@@ -387,6 +455,19 @@ pub const Flasher = struct {
         }
     }
 };
+
+pub fn verify(flasher: *const Flasher, addr: u64, data: []const u8, maybe_progress: ?Progress) !bool {
+    var offset: u64 = 0;
+    while (offset < data.len) : (offset += flasher.algorithm.page_size) {
+        const count = @min(data.len - offset, flasher.algorithm.page_size);
+        try flasher.target.memory.write(flasher.data_addr, data[offset..][0..count]);
+        if (!try flasher.verify(addr + offset, flasher.data_addr, count)) {
+            return false;
+        }
+        if (maybe_progress) |progress| try progress.increment(count);
+    }
+    return true;
+}
 
 /// Writes ordered but maybe sparse data (in terms of address) to flash.
 pub const Programmer = struct {
@@ -432,6 +513,7 @@ pub const Programmer = struct {
         const flash_addr: u64 = prog.current_flash_addr - prog.writer.offset;
         var offset: u64 = 0;
         while (offset < prog.writer.offset) : (offset += page_size) {
+            log.debug("programming 0x{x}->0x{x}", .{ flash_addr + offset, flash_addr + offset + page_size });
             try prog.flasher.program_page(flash_addr + offset, ram_addr + offset);
             if (prog.maybe_progress) |progress| try progress.increment(1);
         }

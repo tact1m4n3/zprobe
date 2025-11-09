@@ -10,6 +10,7 @@ const Mem_AP = @This();
 
 adi: *ARM_DebugInterface,
 address: AP_Address,
+is_big_endian: bool,
 support_other_sizes: bool,
 support_large_address_ext: bool,
 support_large_data_ext: bool,
@@ -31,6 +32,7 @@ pub fn init(adi: *ARM_DebugInterface, ap_address: AP_Address) !Mem_AP {
 
     const cfg = try regs.CFG.read(adi, ap_address);
 
+    const is_big_endian = cfg.BE == 1;
     const support_large_address_ext = cfg.LA == 1;
     const support_large_data_ext = cfg.LD == 1;
 
@@ -52,6 +54,7 @@ pub fn init(adi: *ARM_DebugInterface, ap_address: AP_Address) !Mem_AP {
     return .{
         .adi = adi,
         .address = ap_address,
+        .is_big_endian = is_big_endian,
         .support_other_sizes = support_other_sizes,
         .support_large_address_ext = support_large_address_ext,
         .support_large_data_ext = support_large_data_ext,
@@ -122,7 +125,9 @@ pub fn read_u8(mem_ap: *Mem_AP, addr: u64, data: []u8) !void {
         try mem_ap.adi.ap_reg_read_repeated(mem_ap.address, regs.DRW.addr, mem_ap.tmp_buf[0..count]);
 
         for (0..count) |i| {
-            data[offset + i] = @truncate(mem_ap.tmp_buf[i] >> @intCast(((base_addr + i) & 0b11) * 8));
+            var shift_amount = ((base_addr + i) & 0b11) * 8;
+            if (mem_ap.is_big_endian) shift_amount = 32 - shift_amount;
+            data[offset + i] = @truncate(mem_ap.tmp_buf[i] >> @intCast(shift_amount));
         }
 
         offset += count;
@@ -147,7 +152,9 @@ pub fn read_u16(mem_ap: *Mem_AP, addr: u64, data: []u16) !void {
         try mem_ap.adi.ap_reg_read_repeated(mem_ap.address, regs.DRW.addr, mem_ap.tmp_buf[0..count]);
 
         for (0..count) |i| {
-            data[offset + i] = @truncate(mem_ap.tmp_buf[i] >> @intCast(((base_addr + i) & 0b1) * 16));
+            var shift_amount = ((base_addr + i) & 0b1) * 16;
+            if (mem_ap.is_big_endian) shift_amount = 32 - shift_amount;
+            data[offset + i] = @truncate(mem_ap.tmp_buf[i] >> @intCast(shift_amount));
         }
 
         offset += count;
@@ -187,7 +194,9 @@ pub fn write_u8(mem_ap: *Mem_AP, addr: u64, data: []const u8) !void {
         // Bytes need to be aligned according to byte lanes
         const count = @min(data.len - offset, max_count);
         for (0..count) |i| {
-            mem_ap.tmp_buf[i] = @as(u32, data[offset + i]) << @intCast(((base_addr + i) & 0b11) * 8);
+            var shift_amount = ((base_addr + i) & 0b11) * 8;
+            if (mem_ap.is_big_endian) shift_amount = 32 - shift_amount;
+            mem_ap.tmp_buf[i] = @as(u32, data[offset + i]) << @intCast(shift_amount);
         }
         try mem_ap.adi.ap_reg_write_repeated(mem_ap.address, regs.DRW.addr, mem_ap.tmp_buf[0..count]);
 
@@ -210,7 +219,9 @@ pub fn write_u16(mem_ap: *Mem_AP, addr: u64, data: []const u16) !void {
 
         const count = @min(data.len - offset, max_count);
         for (0..count) |i| {
-            mem_ap.tmp_buf[i] = @as(u32, data[offset + i]) << @intCast(((base_addr + i) & 0b1) * 16);
+            var shift_amount = ((base_addr + i) & 0b1) * 16;
+            if (mem_ap.is_big_endian) shift_amount = 32 - shift_amount;
+            mem_ap.tmp_buf[i] = @as(u32, data[offset + i]) << @intCast(shift_amount);
         }
         try mem_ap.adi.ap_reg_write_repeated(mem_ap.address, regs.DRW.addr, mem_ap.tmp_buf[0..count]);
         offset += count;

@@ -7,6 +7,10 @@ const Target = @import("Target.zig");
 
 const RTT_Host = @This();
 
+// TODO: Write
+// TODO: Io.Reader/Writer interfaces
+// TODO: Support 64 bit
+
 name_pool: std.heap.ArenaAllocator,
 control_block_address: u64,
 header: Header,
@@ -14,9 +18,10 @@ up_channels: std.StringHashMapUnmanaged(usize),
 down_channels: std.StringHashMapUnmanaged(usize),
 
 pub const BlockLocationHint = union(enum) {
-    /// Scan either a given region or the first n bytes in all RAM memory regions
+    /// Scan either a given region or the first n bytes in all RAM memory
+    /// regions.
     blind: Blind,
-    /// More efficient lookup using info provided by an ELF
+    /// More efficient lookup using info provided by an ELF.
     with_elf: With_ELF,
 
     pub const Blind = union(enum) {
@@ -55,6 +60,7 @@ pub fn init(
 ) !RTT_Host {
     const timeout: Timeout = try .init(.{
         .after = options.timeout_ns,
+        .sleep_per_tick_ns = 1 * std.time.ns_per_ms,
     });
 
     const result = loop: while (true) {
@@ -128,13 +134,11 @@ pub fn read(rtt_host: RTT_Host, target: *Target, index: usize, buffer: []u8) !us
     if (first_count > 0) try target.memory.read(channel.buffer_ptr + channel.read_offset, buffer[0..first_count]);
     if (second_count > 0) try target.memory.read(channel.buffer_ptr + first_count, buffer[first_count..][0..second_count]);
 
-    var read_offset_buf: [4]u8 = undefined;
-    std.mem.writeInt(u32, &read_offset_buf, (channel.read_offset + first_count + second_count) % channel.size, target.endian);
-    try target.memory.write(channel_address + @offsetOf(Channel, "read_offset"), &read_offset_buf);
+    const read_offset = (channel.read_offset + first_count + second_count) % channel.size;
+    try target.memory.write_u32(channel_address + @offsetOf(Channel, "read_offset"), &.{read_offset});
     return first_count + second_count;
 }
 
-// TODO: write to channel
 // pub fn write(rtt_host: RTT_Host, target: *Target, index: usize, buffer: []u8) !usize {
 //     if (index >= rtt_host.header.max_down_channels)
 //         return error.InvalidChannelIndex;
@@ -184,6 +188,8 @@ fn find_control_block(
         },
         .with_elf => |with_elf_hint| switch (with_elf_hint.method) {
             .auto => for (with_elf_hint.elf_info.load_segments.items) |seg| {
+                const region_kind = target.find_memory_region_kind(seg.virtual_address, seg.memory_size) orelse continue;
+                if (region_kind != .ram) continue;
                 if ((try find_control_block_in_range(target, seg.virtual_address, seg.memory_size, timeout, maybe_progress))) |result| {
                     return result;
                 }
@@ -236,8 +242,6 @@ fn find_control_block_in_range(
         }
     } else return null;
 }
-
-// TODO: Io.Reader/Writer interfaces
 
 fn bytes_as_struct(comptime T: type, bytes: []const u8, endian: std.builtin.Endian) T {
     var value: T = undefined;

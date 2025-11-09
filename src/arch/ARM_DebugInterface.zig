@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.ADI);
 
 const ARM_DebugInterface = @This();
 
@@ -316,7 +317,7 @@ fn debug_port_setup(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
     var is_v1: bool = dp_address == .default;
 
     for (0..5) |i| {
-        std.log.debug("trying to setup debug port with address {f}... Attempt {}", .{ dp_address, i + 1 });
+        log.debug("trying to setup debug port with address {f}... Attempt {}", .{ dp_address, i + 1 });
 
         // Line reset
         try adi.line_reset_sequence();
@@ -357,7 +358,7 @@ fn debug_port_setup(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
 }
 
 fn debug_port_connect(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
-    std.log.debug("connecting to debug port with address {f}...", .{dp_address});
+    log.debug("connecting to debug port with address {f}...", .{dp_address});
 
     if (adi.active_protocol == .jtag) return;
 
@@ -409,7 +410,7 @@ fn debug_port_connect(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
             const targetid_match = (target_id & TARGETID_MASK) == (targetsel & TARGETID_MASK);
             const dlpdir_match = (dlpidr & DLPIDR_MASK) == (targetsel & DLPIDR_MASK);
             if (!targetid_match or !dlpdir_match) {
-                std.log.err("Target ID and DLPIDR do not match, failed to select debug port. Target ID: {x}, DLPIDR: {x}", .{
+                log.err("Target ID and DLPIDR do not match, failed to select debug port. Target ID: {x}, DLPIDR: {x}", .{
                     target_id,
                     dlpidr,
                 });
@@ -419,11 +420,11 @@ fn debug_port_connect(adi: *ARM_DebugInterface, dp_address: DP_Address) !void {
         else => {},
     }
 
-    std.log.debug("connected to debug port", .{});
+    log.debug("connected to debug port", .{});
 }
 
 fn debug_port_start(adi: *ARM_DebugInterface) !void {
-    std.log.debug("starting debug port...", .{});
+    log.debug("starting debug port...", .{});
 
     // Switch to DP Register Bank 0
     try adi.raw_reg_write(.dp, 0x8, 0x00000000);
@@ -457,7 +458,7 @@ fn debug_port_start(adi: *ARM_DebugInterface) !void {
         try adi.raw_reg_write(.dp, 0x0, 0x0000001E);
     }
 
-    std.log.debug("debug port ready", .{});
+    log.debug("debug port ready", .{});
 }
 
 pub const DP_RegisterAddress = struct {

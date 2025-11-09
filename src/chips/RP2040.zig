@@ -44,6 +44,7 @@ pub fn init(rp2040: *RP2040, adi: *ADI) !void {
     rp2040.target = .{
         .name = "RP2040",
         .endian = .little,
+        .arch = .thumb,
         .valid_cores = .with_ids(&.{ CORE0_ID, CORE1_ID }),
         .memory_map = comptime &.{
             .{ .offset = 0x10000000, .length = 2048 * 1024, .kind = .flash },
@@ -51,6 +52,24 @@ pub fn init(rp2040: *RP2040, adi: *ADI) !void {
         },
         .flash_algorithms = comptime &.{
             flash.get_algorithm("RP2040"),
+            // .{
+            //     .name = "RP2040-probe-rs",
+            //     .memory_range = .{
+            //         .start = 0x10000000,
+            //         .size = 0x8000000,
+            //     },
+            //     .instructions = "8LWFsB5MfEQgeAEoAdEA8Dv4ASAEkCBwFU4wRvcwAPCJ+AOUBEYTT7gcAPCD+AVGMEYA8H/4ApAPSADwe/gBkA5IAPB3+AZGOEYA8HP4B0agR6hHC0h4RDDAApkBYAGZBDDCwASYA5kIcAAgBbDwvVJFAABDWAAAUlAAAEZDAABeAQAA9gAAALC1CEx8RCB4ASgI0QZNfUQoaYBHaGmARwAgIHCwvQEgsL3ARtgAAAC2AAAABUh4RAB4ACgB0QEgcEcBSHBHwEbQcAAArgAAABC1Ckl5RAl4ASkM0Q8hCQdAGAdJeUSMaAEiEQMSBNgjoEcAIBC9ASAQvcBGkAAAAGgAAAAQtQtGCEl5RAl4ASkK0Q8hCQdAGAVJeUTMaBFGGkagRwAgEL0BIBC9WgAAADIAAACAshQhCYiJHkqIACoE0AkdgkL50QiIcEf+3tTUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANTU1A==",
+            //     .init_fn = 0x1,
+            //     .uninit_fn = 0x89,
+            //     .program_page_fn = 0x105,
+            //     .erase_sector_fn = 0xd1,
+            //     .data_section_offset = 0,
+            //     .page_size = 0x1000,
+            //     .erased_byte_value = 0xff,
+            //     .program_page_timeout = 1000,
+            //     .erase_sector_timeout = 3000,
+            //     .sectors = &.{.{ .addr = 0x0, .size = 0x1000 }},
+            // },
         },
         .memory = rp2040.core0_ap.memory(),
         .debug = rp2040.cores.debug(),

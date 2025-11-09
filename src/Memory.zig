@@ -97,6 +97,7 @@ pub fn default_write_u64(_: *anyopaque, _: u64, _: []const u64) WriteError!void 
     return error.Unsupported;
 }
 
+// TODO: remove
 pub const Reader = struct {
     interface: std.Io.Reader,
     memory: Memory,
@@ -132,6 +133,7 @@ pub const Reader = struct {
     }
 };
 
+// TODO: remove
 pub const Writer = struct {
     interface: std.Io.Writer,
     memory: Memory,
