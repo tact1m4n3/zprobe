@@ -1,10 +1,11 @@
 const std = @import("std");
 
+const ADI = @import("../arch/ARM_DebugInterface.zig");
 const libusb = @import("../libusb.zig");
 const c = libusb.c;
-
 const probe = @import("../probe.zig");
-const ADI = @import("../arch/ARM_DebugInterface.zig");
+
+const log = std.log.scoped(.CMSIS_DAP);
 
 const CMSIS_DAP = @This();
 
@@ -68,28 +69,28 @@ pub fn attach(cmsis_dap: CMSIS_DAP, speed: probe.Speed) !void {
         .swd => .swd,
         .jtag => .jtag,
     }) catch |err| {
-        std.log.err("failed to connect to probe: {t}", .{err});
+        log.err("failed to connect to probe: {t}", .{err});
         return error.AttachFailed;
     };
     errdefer cmsis_dap.disconnect() catch |err| {
-        std.log.err("failed to disconnect from probe: {t}", .{err});
+        log.err("failed to disconnect from probe: {t}", .{err});
     };
 
     cmsis_dap.transfer_configure(2, 32, 32) catch |err| {
-        std.log.err("failed to configure transfers: {t}", .{err});
+        log.err("failed to configure transfers: {t}", .{err});
         return error.AttachFailed;
     };
 
-    std.log.debug("setting SWJ clock to {f}", .{speed});
+    log.debug("setting SWJ clock to {f}", .{speed});
     cmsis_dap.swj_clock(@intFromEnum(speed)) catch |err| {
-        std.log.err("failed to set SWJ clock: {t}", .{err});
+        log.err("failed to set SWJ clock: {t}", .{err});
         return error.AttachFailed;
     };
 }
 
 pub fn detach(cmsis_dap: CMSIS_DAP) void {
     cmsis_dap.disconnect() catch |err| {
-        std.log.err("failed to disconnect from probe: {t}", .{err});
+        log.err("failed to disconnect from probe: {t}", .{err});
     };
 }
 
@@ -300,7 +301,7 @@ fn adi_swj_sequence_impl(adi: *ADI, bit_count: u8, sequence: u64) ADI.Error!void
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     cmsis_dap.swj_sequence(bit_count, sequence) catch |err| {
-        std.log.debug("failed to send SWJ sequence: {t}", .{err});
+        log.debug("failed to send SWJ sequence: {t}", .{err});
         return error.CommandFailed;
     };
 }
@@ -309,7 +310,7 @@ fn adi_raw_reg_read_impl(adi: *ADI, port: ADI.RegisterPort, addr: u4) ADI.Error!
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     return cmsis_dap.reg_read(port, addr) catch |err| {
-        std.log.debug("failed to read register: {t}", .{err});
+        log.debug("failed to read register: {t}", .{err});
         return error.CommandFailed;
     };
 }
@@ -318,7 +319,7 @@ fn adi_raw_reg_write_impl(adi: *ADI, port: ADI.RegisterPort, addr: u4, value: u3
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     cmsis_dap.reg_write(port, addr, value) catch |err| {
-        std.log.debug("failed to write register: {t}", .{err});
+        log.debug("failed to write register: {t}", .{err});
         return error.CommandFailed;
     };
 }
@@ -327,7 +328,7 @@ fn adi_raw_reg_read_repeated_impl(adi: *ADI, port: ADI.RegisterPort, addr: u4, d
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     return cmsis_dap.reg_read_repeated(port, addr, data) catch |err| {
-        std.log.debug("failed to read register: {t}", .{err});
+        log.debug("failed to read register: {t}", .{err});
         return error.CommandFailed;
     };
 }
@@ -336,7 +337,7 @@ fn adi_raw_reg_write_repeated_impl(adi: *ADI, port: ADI.RegisterPort, addr: u4, 
     const cmsis_dap: *CMSIS_DAP = @fieldParentPtr("adi", adi);
 
     cmsis_dap.reg_write_repeated(port, addr, data) catch |err| {
-        std.log.debug("failed to write register: {t}", .{err});
+        log.debug("failed to write register: {t}", .{err});
         return error.CommandFailed;
     };
 }
