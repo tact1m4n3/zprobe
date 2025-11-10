@@ -15,18 +15,22 @@ pub const RunMethod = enum {
     call_entry,
 };
 
+pub const ELF_LoadOptions = struct {
+    elf_info: elf.Info,
+    elf_file_reader: *std.fs.File.Reader,
+    run_method: ?RunMethod = null,
+    progress: ?Progress = null,
+};
+
 pub fn load_elf(
     allocator: std.mem.Allocator,
     target: *Target,
-    elf_info: elf.Info,
-    elf_file_reader: *std.fs.File.Reader,
-    maybe_run_method: ?RunMethod,
-    maybe_progress: ?Progress,
+    options: ELF_LoadOptions,
 ) !void {
     var flash_only = true;
     var ram_only = true;
 
-    for (elf_info.load_segments.items) |elf_seg| {
+    for (options.elf_info.load_segments.items) |elf_seg| {
         if (elf_seg.file_size == 0) continue;
         if (target.find_memory_region_kind(elf_seg.physical_address, elf_seg.memory_size)) |region_kind| {
             switch (region_kind) {
@@ -36,26 +40,28 @@ pub fn load_elf(
         }
     }
 
-    if (!flash_only and !ram_only and maybe_run_method == null) {
+    if (!flash_only and !ram_only and options.run_method == null) {
         return error.RunMethodRequired;
     }
 
     var loader: Loader = .{};
     defer loader.deinit(allocator);
-    try loader.add_elf(allocator, elf_info, elf_file_reader);
-    try loader.load(allocator, target, maybe_progress, ram_only);
+    try loader.add_elf(allocator, options.elf_info, options.elf_file_reader);
+    try loader.load(allocator, target, .{
+        .ram_only = ram_only,
+        .progress = options.progress,
+    });
 
-    // TODO: should we call system reset afterwards?
-    if (maybe_run_method) |run_method| switch (run_method) {
+    if (options.run_method) |run_method| switch (run_method) {
         .reboot => try target.reset(.all),
         .call_entry => {
-            try target.write_register(.boot, .instruction_pointer, elf_info.header.entry);
+            try target.write_register(.boot, .instruction_pointer, options.elf_info.header.entry);
             try target.run(.boot);
         },
     } else if (flash_only) {
         try target.reset(.all);
     } else if (ram_only) {
-        try target.write_register(.boot, .instruction_pointer, elf_info.header.entry);
+        try target.write_register(.boot, .instruction_pointer, options.elf_info.header.entry);
         try target.run(.boot);
     } else unreachable; // branch checked earlier
 }
@@ -133,8 +139,18 @@ pub const Loader = struct {
         std.mem.sort(Segment, loader.segments.items, {}, Segment.is_less);
     }
 
-    pub fn load(loader: *Loader, allocator: std.mem.Allocator, target: *Target, maybe_progress: ?Progress, ram_only: bool) !void {
-        if (!ram_only) flash: {
+    pub const LoadOptions = struct {
+        ram_only: bool = false,
+        progress: ?Progress = null,
+    };
+
+    pub fn load(
+        loader: *Loader,
+        allocator: std.mem.Allocator,
+        target: *Target,
+        options: LoadOptions,
+    ) !void {
+        if (!options.ram_only) flash: {
             for (target.flash_algorithms) |algorithm| {
                 const flasher: Flasher = try .init(allocator, target, &algorithm);
 
@@ -152,7 +168,7 @@ pub const Loader = struct {
                     const end_page_index = (algorithm_offset + segment.data.len) / algorithm.page_size;
                     dirty_pages.setRangeValue(.{
                         .start = start_page_index,
-                        .end = end_page_index,
+                        .end = end_page_index + 1,
                     }, true);
 
                     total_packed_data += segment.data.len;
@@ -163,15 +179,15 @@ pub const Loader = struct {
 
                 // TODO: maybe make this check optional
                 const should_flash = if (flasher.algorithm.verify_fn != null) blk: {
-                    if (maybe_progress) |progress| try progress.begin("Checking", total_packed_data);
-                    defer if (maybe_progress) |progress| progress.end();
+                    if (options.progress) |progress| try progress.begin("Checking", total_packed_data);
+                    defer if (options.progress) |progress| progress.end();
 
                     try flasher.begin(.verify);
                     defer flasher.end(.verify) catch {};
 
                     for (loader.segments.items) |segment| {
                         if (!segment.marked) continue;
-                        if (!try verify(&flasher, segment.addr, segment.data, maybe_progress))
+                        if (!try verify(&flasher, segment.addr, segment.data, options.progress))
                             break :blk true;
                     }
                     break :blk false;
@@ -182,8 +198,8 @@ pub const Loader = struct {
 
                 // Start erasing
                 {
-                    if (maybe_progress) |progress| try progress.begin("Erasing", total_dirty_pages);
-                    defer if (maybe_progress) |progress| progress.end();
+                    if (options.progress) |progress| try progress.begin("Erasing", total_dirty_pages);
+                    defer if (options.progress) |progress| progress.end();
 
                     try flasher.begin(.erase);
                     defer flasher.end(.erase) catch {};
@@ -214,7 +230,7 @@ pub const Loader = struct {
                                 const erase_addr = algorithm.memory_range.start + index * algorithm.page_size;
                                 log.debug("erasing 0x{x}->0x{x}", .{ erase_addr, erase_addr + sector_info.size });
                                 try flasher.erase_sector(erase_addr);
-                                if (maybe_progress) |progress| try progress.increment(pages_per_sector);
+                                if (options.progress) |progress| try progress.increment(pages_per_sector);
                             }
                         }
                     }
@@ -222,26 +238,31 @@ pub const Loader = struct {
 
                 // Start flashing
                 {
-                    if (maybe_progress) |progress| try progress.begin("Flashing", total_dirty_pages);
-                    defer if (maybe_progress) |progress| progress.end();
+                    if (options.progress) |progress| try progress.begin("Flashing", total_dirty_pages);
+                    defer if (options.progress) |progress| progress.end();
 
                     try flasher.begin(.program);
                     defer flasher.end(.program) catch {};
 
-                    // TODO: What makes a good buffer size here?
-                    var buffer: [4096]u8 = undefined;
-                    var prog: Programmer = .init(&flasher, maybe_progress, &buffer);
+                    var prog: Programmer = .{
+                        .flasher = &flasher,
+                        .maybe_progress = options.progress,
+                        .data = .init(allocator),
+                        .current_page_addr = flasher.algorithm.memory_range.start,
+                    };
 
-                    for (loader.segments.items) |*segment| {
+                    for (loader.segments.items) |segment| {
                         if (!segment.marked) continue;
                         try prog.write(segment.addr, segment.data);
                     }
                     try prog.flush();
+
+                    prog.data.deinit();
                 }
 
                 if (flasher.algorithm.verify_fn != null) {
-                    if (maybe_progress) |progress| try progress.begin("Verify", total_packed_data);
-                    defer if (maybe_progress) |progress| progress.end();
+                    if (options.progress) |progress| try progress.begin("Verify", total_packed_data);
+                    defer if (options.progress) |progress| progress.end();
 
                     try flasher.begin(.verify);
                     defer flasher.end(.verify) catch {};
@@ -249,7 +270,7 @@ pub const Loader = struct {
                     for (loader.segments.items) |segment| {
                         if (!segment.marked) continue;
                         log.debug("verifying 0x{x}->0x{x}", .{ segment.addr, segment.addr + segment.data.len });
-                        if (!try verify(&flasher, segment.addr, segment.data, maybe_progress))
+                        if (!try verify(&flasher, segment.addr, segment.data, options.progress))
                             return error.FlashDataMismatch;
                     }
                 }
@@ -387,8 +408,7 @@ pub const Flasher = struct {
         if (return_value != 0) return error.EndFailed;
     }
 
-    /// Program flash. Address must be aligned to page_size and
-    /// data.len must less than page_size.
+    /// Program a flash page. Addresses must be aligned to page_size.
     pub fn program_page(flasher: Flasher, addr: u64, data_addr: u64) !void {
         try flasher.call_fn(flasher.algorithm.program_page_fn, &.{
             addr,
@@ -473,51 +493,45 @@ pub fn verify(flasher: *const Flasher, addr: u64, data: []const u8, maybe_progre
 pub const Programmer = struct {
     flasher: *const Flasher,
     maybe_progress: ?Progress,
-    writer: Target.Memory.Writer,
-    current_flash_addr: u64,
-
-    pub fn init(flasher: *const Flasher, maybe_progress: ?Progress, buffer: []u8) Programmer {
-        return .{
-            .flasher = flasher,
-            .maybe_progress = maybe_progress,
-            .writer = .init(flasher.target.memory, buffer, flasher.data_addr),
-            .current_flash_addr = flasher.algorithm.memory_range.start,
-        };
-    }
+    data: std.Io.Writer.Allocating,
+    current_page_addr: u64,
 
     pub fn write(prog: *Programmer, addr: u64, data: []const u8) !void {
         const page_size = prog.flasher.algorithm.page_size;
-        std.debug.assert(prog.current_flash_addr <= addr);
-        if (addr >= std.mem.alignForward(u64, prog.current_flash_addr, page_size) + page_size or
-            (prog.writer.offset + data.len) / page_size + 2 >= prog.flasher.max_data_pages)
-        {
-            try prog.flush();
-            prog.current_flash_addr = std.mem.alignBackward(u64, addr, page_size);
+        if (addr >= prog.current_page_addr + page_size) {
+            if (prog.data.writer.end > 0) {
+                try prog.data.writer.splatByteAll(prog.flasher.algorithm.erased_byte_value, page_size - prog.data.writer.end);
+                try prog.flush();
+            }
+            prog.current_page_addr = std.mem.alignBackward(u64, addr, page_size);
+        } else {
+            try prog.data.writer.splatByteAll(prog.flasher.algorithm.erased_byte_value, addr - prog.current_page_addr - prog.data.writer.end);
         }
-        try prog.writer.interface.splatByteAll(prog.flasher.algorithm.erased_byte_value, addr - prog.current_flash_addr);
-        try prog.writer.interface.writeAll(data);
-        prog.current_flash_addr += data.len;
+
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const count = @min(page_size - prog.data.writer.end, data.len - offset);
+            try prog.data.writer.writeAll(data[offset..][0..count]);
+            offset += count;
+            if (prog.data.writer.end == page_size)
+                try prog.flush();
+        }
     }
 
     pub fn flush(prog: *Programmer) !void {
-        if (prog.writer.offset == 0) return;
+        if (prog.data.writer.end == 0) return;
 
         const page_size = prog.flasher.algorithm.page_size;
-        const aligned_end = std.mem.alignForward(u64, prog.current_flash_addr, page_size);
-        try prog.writer.interface.splatByteAll(prog.flasher.algorithm.erased_byte_value, aligned_end - prog.current_flash_addr);
-        try prog.writer.interface.flush();
+        try prog.data.writer.splatByteAll(prog.flasher.algorithm.erased_byte_value, page_size - prog.data.writer.end);
+        try prog.data.writer.flush(); // no op
 
-        prog.current_flash_addr = aligned_end;
+        log.debug("programming 0x{x}->0x{x} {}", .{ prog.current_page_addr, prog.current_page_addr + page_size, prog.data.written().len });
+        try prog.flasher.target.memory.write(prog.flasher.data_addr, prog.data.written());
+        try prog.flasher.program_page(prog.current_page_addr, prog.flasher.data_addr);
 
-        const ram_addr: u64 = prog.writer.address;
-        const flash_addr: u64 = prog.current_flash_addr - prog.writer.offset;
-        var offset: u64 = 0;
-        while (offset < prog.writer.offset) : (offset += page_size) {
-            log.debug("programming 0x{x}->0x{x}", .{ flash_addr + offset, flash_addr + offset + page_size });
-            try prog.flasher.program_page(flash_addr + offset, ram_addr + offset);
-            if (prog.maybe_progress) |progress| try progress.increment(1);
-        }
+        if (prog.maybe_progress) |progress| try progress.increment(1);
 
-        prog.writer.offset = 0;
+        prog.current_page_addr += page_size;
+        prog.data.clearRetainingCapacity();
     }
 };

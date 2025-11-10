@@ -49,7 +49,7 @@ fn list_impl(args: cli.Command.List) !void {
 
     switch (args.request) {
         .probes => @panic("TODO"),
-        .chips => try write_output(&stdout_writer.interface, std.enums.values(zprobe.chip.Tag), args.output_format),
+        .chips => try write_output(&stdout_writer.interface, std.enums.values(cli.ChipTag), args.output_format),
     }
 
     try stdout_writer.interface.flush();
@@ -85,19 +85,41 @@ fn serialize_text(writer: *std.Io.Writer, data: anytype) !void {
     }
 }
 
+pub const AnyChip = union(cli.ChipTag) {
+    RP2040: zprobe.chips.RP2040,
+
+    pub fn init(any_chip: *AnyChip, chip_tag: cli.ChipTag, probe: zprobe.Probe) !void {
+        switch (chip_tag) {
+            inline else => |tag| try @field(any_chip.*, @tagName(tag)).init(probe),
+        }
+    }
+
+    pub fn deinit(any_chip: *AnyChip) void {
+        switch (any_chip.*) {
+            inline else => |*chip| chip.deinit(),
+        }
+    }
+
+    pub fn target(any_chip: *AnyChip) *zprobe.Target {
+        return switch (any_chip.*) {
+            inline else => |*chip| &chip.target,
+        };
+    }
+};
+
 fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Command.Load) !void {
     try feedback.update("Connecting to probe");
-    var any_probe: zprobe.probe.Any = try .detect_usb(allocator, .{});
-    defer any_probe.deinit();
+    var probe: zprobe.Probe = try .create(allocator, .{});
+    defer probe.destroy(allocator);
 
-    try any_probe.attach(args.speed);
-    defer any_probe.detach();
+    try probe.attach(args.speed);
+    defer probe.detach();
 
     try feedback.update("Initializing target");
-    var chip: zprobe.chip.RP2040 = undefined;
-    try chip.init(any_probe.arm_debug_interface() orelse return error.No_ARM_DebugInterface);
+    var chip: AnyChip = undefined;
+    try chip.init(args.chip, probe);
     defer chip.deinit();
-    const target = &chip.target;
+    const target = chip.target();
 
     try feedback.update("Reading ELF");
     const elf_file = try std.fs.cwd().openFile(args.elf_file, .{});
@@ -113,7 +135,12 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
 
     try feedback.update("Loading image");
 
-    zprobe.flash.load_elf(allocator, target, elf_info, &elf_file_reader, args.run_method, feedback.progress()) catch |err| switch (err) {
+    zprobe.flash.load_elf(allocator, target, .{
+        .elf_info = elf_info,
+        .elf_file_reader = &elf_file_reader,
+        .run_method = args.run_method,
+        .progress = feedback.progress(),
+    }) catch |err| switch (err) {
         error.RunMethodRequired => {
             std.log.err("Please specify how you want the image to be ran with the `--run_method` option. Your elf contains segments in both flash and ram.", .{});
             return err;

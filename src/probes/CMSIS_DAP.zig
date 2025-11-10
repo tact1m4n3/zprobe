@@ -3,7 +3,7 @@ const std = @import("std");
 const ADI = @import("../arch/ARM_DebugInterface.zig");
 const libusb = @import("../libusb.zig");
 const c = libusb.c;
-const probe = @import("../probe.zig");
+const Probe = @import("../Probe.zig");
 
 const log = std.log.scoped(.CMSIS_DAP);
 
@@ -55,22 +55,57 @@ pub fn init_with_device(
     };
 }
 
-pub fn deinit(cmsis_dap: *CMSIS_DAP) void {
-    const allocator = cmsis_dap.adi.allocator;
+pub fn create(
+    allocator: std.mem.Allocator,
+    filter: libusb.DeviceIterator.Filter,
+) !*CMSIS_DAP {
+    const cmsis_dap = try allocator.create(CMSIS_DAP);
+    errdefer allocator.destroy(cmsis_dap);
+    cmsis_dap.* = try .init(allocator, filter);
+    return cmsis_dap;
+}
 
+pub fn create_with_device(
+    allocator: std.mem.Allocator,
+    device: ?*c.struct_libusb_device,
+) !*CMSIS_DAP {
+    const cmsis_dap = try allocator.create(CMSIS_DAP);
+    errdefer allocator.destroy(cmsis_dap);
+    cmsis_dap.* = try .init_with_device(allocator, device);
+    return cmsis_dap;
+}
+
+pub fn deinit(cmsis_dap: *CMSIS_DAP, allocator: std.mem.Allocator) void {
     cmsis_dap.adi.deinit();
     cmsis_dap.dev.deinit();
 
     allocator.free(cmsis_dap.buf);
 }
 
-pub fn attach(cmsis_dap: CMSIS_DAP, speed: probe.Speed) !void {
+pub fn destroy(cmsis_dap: *CMSIS_DAP, allocator: std.mem.Allocator) void {
+    cmsis_dap.deinit(allocator);
+    allocator.destroy(cmsis_dap);
+}
+
+pub fn probe(cmsis_dap: *CMSIS_DAP) Probe {
+    return .{
+        .ptr = cmsis_dap,
+        .vtable = comptime &.{
+            .destroy = type_erased_probe_destroy,
+            .attach = type_erased_probe_attach,
+            .detach = type_erased_probe_detach,
+            .arm_debug_interface = type_erased_probe_arm_debug_interface,
+        },
+    };
+}
+
+pub fn attach(cmsis_dap: *CMSIS_DAP, speed: Probe.Speed) !void {
     _ = cmsis_dap.connect(switch (cmsis_dap.adi.active_protocol) {
         .swd => .swd,
         .jtag => .jtag,
     }) catch |err| {
         log.err("failed to connect to probe: {t}", .{err});
-        return error.AttachFailed;
+        return err;
     };
     errdefer cmsis_dap.disconnect() catch |err| {
         log.err("failed to disconnect from probe: {t}", .{err});
@@ -78,17 +113,17 @@ pub fn attach(cmsis_dap: CMSIS_DAP, speed: probe.Speed) !void {
 
     cmsis_dap.transfer_configure(2, 32, 32) catch |err| {
         log.err("failed to configure transfers: {t}", .{err});
-        return error.AttachFailed;
+        return err;
     };
 
     log.debug("setting SWJ clock to {f}", .{speed});
     cmsis_dap.swj_clock(@intFromEnum(speed)) catch |err| {
         log.err("failed to set SWJ clock: {t}", .{err});
-        return error.AttachFailed;
+        return err;
     };
 }
 
-pub fn detach(cmsis_dap: CMSIS_DAP) void {
+pub fn detach(cmsis_dap: *CMSIS_DAP) void {
     cmsis_dap.disconnect() catch |err| {
         log.err("failed to disconnect from probe: {t}", .{err});
     };
@@ -340,6 +375,26 @@ fn adi_raw_reg_write_repeated_impl(adi: *ADI, port: ADI.RegisterPort, addr: u4, 
         log.debug("failed to write register: {t}", .{err});
         return error.CommandFailed;
     };
+}
+
+fn type_erased_probe_destroy(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const cmsis_dap: *CMSIS_DAP = @ptrCast(@alignCast(ptr));
+    cmsis_dap.destroy(allocator);
+}
+
+fn type_erased_probe_attach(ptr: *anyopaque, speed: Probe.Speed) Probe.AttachError!void {
+    const cmsis_dap: *CMSIS_DAP = @ptrCast(@alignCast(ptr));
+    cmsis_dap.attach(speed) catch return error.AttachFailed;
+}
+
+fn type_erased_probe_detach(ptr: *anyopaque) void {
+    const cmsis_dap: *CMSIS_DAP = @ptrCast(@alignCast(ptr));
+    cmsis_dap.detach();
+}
+
+fn type_erased_probe_arm_debug_interface(ptr: *anyopaque) ?*ADI {
+    const cmsis_dap: *CMSIS_DAP = @ptrCast(@alignCast(ptr));
+    return &cmsis_dap.adi;
 }
 
 fn bad() error{BadProbeResponse} {

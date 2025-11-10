@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const Probe = @import("../Probe.zig");
 const ADI = @import("../arch/ARM_DebugInterface.zig");
 const Target = @import("../Target.zig");
 const flash = @import("../flash.zig");
@@ -31,7 +32,9 @@ cores: ADI.Cortex_M.System(&.{
 }),
 target: Target,
 
-pub fn init(rp2040: *RP2040, adi: *ADI) !void {
+pub fn init(rp2040: *RP2040, probe: Probe) !void {
+    const adi = probe.arm_debug_interface() orelse return error.ADI_NotSupported;
+
     rp2040.adi = adi;
     rp2040.core0_ap = try .init(adi, AP_CORE0);
     rp2040.core1_ap = try .init(adi, AP_CORE1);

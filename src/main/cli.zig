@@ -26,8 +26,8 @@ pub const Command = union(CommandList) {
 
     pub const Load = struct {
         elf_file: []const u8,
-        speed: zprobe.probe.Speed,
-        chip: zprobe.chip.Tag,
+        speed: zprobe.Probe.Speed,
+        chip: ChipTag,
         run_method: ?zprobe.flash.RunMethod,
         rtt: bool,
     };
@@ -113,7 +113,7 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
             var load_diag: clap.Diagnostic = .{};
             var load_res = clap.parseEx(clap.Help, &params.load, .{
                 .SPEED = speed_parser,
-                .CHIP = enumeration_parser(zprobe.chip.Tag, error{InvalidChip}, error.InvalidChip),
+                .CHIP = enumeration_parser(ChipTag, error{InvalidChip}, error.InvalidChip),
                 .RUN = enumeration_parser(zprobe.flash.RunMethod, error{InvalidRunMethod}, error.InvalidRunMethod),
                 .ELF_FILE = clap.parsers.string,
             }, &args_iter, .{
@@ -142,7 +142,7 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
                 return error.Missing_ELF;
             };
 
-            const speed: zprobe.probe.Speed = load_res.args.speed orelse .mhz(10);
+            const speed: zprobe.Probe.Speed = load_res.args.speed orelse .mhz(10);
 
             const chip = load_res.args.chip orelse {
                 try writer.interface.writeAll("No chip specified. Use the `--chip <CHIP>` option to choose one. " ++
@@ -167,6 +167,10 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
 pub const CommandList = enum {
     list,
     load,
+};
+
+pub const ChipTag = enum {
+    RP2040,
 };
 
 const command_descriptions = struct {
@@ -251,7 +255,7 @@ fn enumeration_parser(comptime T: type, comptime E: type, err: E) fn ([]const u8
     }.parse;
 }
 
-fn speed_parser(value: []const u8) error{InvalidSpeed}!zprobe.probe.Speed {
+fn speed_parser(value: []const u8) error{InvalidSpeed}!zprobe.Probe.Speed {
     if (std.mem.endsWith(u8, value, "kHz")) {
         return .khz(std.fmt.parseInt(u32, value[0 .. value.len - 3], 10) catch return error.InvalidSpeed);
     } else if (std.mem.endsWith(u8, value, "MHz")) {
