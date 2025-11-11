@@ -2,12 +2,13 @@ const std = @import("std");
 const microzig = @import("microzig");
 
 const zprobe = @import("src/root.zig");
+const ChipTag = @import("src/main/cli.zig").ChipTag;
 
 pub const LoadOptions = struct {
     elf_file: std.Build.LazyPath,
-    speed: zprobe.probe.Speed = .mhz(10),
+    speed: zprobe.Probe.Speed = .mhz(10),
     run_method: ?zprobe.flash.RunMethod = null,
-    chip: zprobe.chip.Tag,
+    chip: ChipTag,
     rtt: bool = false,
 };
 
