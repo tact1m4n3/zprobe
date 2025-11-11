@@ -452,8 +452,13 @@ pub const Flasher = struct {
         try flasher.target.write_register(.boot, .instruction_pointer, flasher.code_addr + ip);
         if (is_init) {
             try flasher.target.write_register(.boot, .stack_pointer, flasher.stack_end_addr);
-            if (flasher.algorithm.data_section_offset) |data_section_offset|
-                try flasher.target.write_register(.boot, .static_base, flasher.code_addr + data_section_offset);
+            if (flasher.algorithm.data_section_offset) |data_section_offset| {
+                switch (flasher.target.arch) {
+                    // write static base
+                    .thumb => try flasher.target.write_register(.boot, .{ .number = 9 }, flasher.code_addr + data_section_offset),
+                    .riscv32 => @panic("TODO"),
+                }
+            }
         }
         try flasher.target.run(.boot);
     }

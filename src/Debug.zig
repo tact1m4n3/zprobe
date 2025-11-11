@@ -133,7 +133,6 @@ pub const RegisterId = union(enum) {
     instruction_pointer,
     stack_pointer,
     frame_pointer,
-    static_base,
     return_address,
 
     return_value,

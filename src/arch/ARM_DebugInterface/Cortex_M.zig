@@ -362,7 +362,6 @@ pub fn System(comptime core_ids: []const Debug.CoreId) type {
 fn get_cm_reg(target_reg: Debug.RegisterId) error{InvalidRegister}!RegisterId {
     return switch (target_reg) {
         .instruction_pointer => .debug_return_address,
-        .static_base => .r9,
         .stack_pointer => .sp,
         .frame_pointer => .r11,
         .return_address => .lr,
@@ -371,7 +370,7 @@ fn get_cm_reg(target_reg: Debug.RegisterId) error{InvalidRegister}!RegisterId {
             @enumFromInt(arg)
         else
             return error.InvalidRegister,
-        .number => |number| if (number < 5)
+        .number => |number| if (number <= 12)
             @enumFromInt(number)
         else
             return error.InvalidRegister,
