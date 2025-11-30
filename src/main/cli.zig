@@ -104,10 +104,15 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
             };
             defer list_res.deinit();
 
+            if (list_res.args.help != 0) {
+                try print_command_help(&writer.interface, "list");
+                return null;
+            }
+
             const request = list_res.positionals[0] orelse {
                 try writer.interface.writeAll("Missing what to list.\n");
-                try print_command_help(&writer.interface, "load");
-                return error.MissingChip;
+                try print_command_help(&writer.interface, "list");
+                return error.InvalidRequest;
             };
 
             const output_format = list_res.args.format orelse .text;
@@ -208,7 +213,7 @@ const params = struct {
         \\--chip <CHIP>       Set the chip of your target.
         \\--run-method <RUN>  How should this image be ran? Valid options: `call_entry`, `reboot`.
         \\--rtt               Print RTT logs after loading the image.
-        \\<ELF_FILE>
+        \\<ELF_FILE>          File to load
         \\
     );
 };
