@@ -492,7 +492,7 @@ pub const DP_Address = union(enum) {
 };
 
 pub const AP_Address = struct {
-    dp: DP_Address,
+    dp: DP_Address = .default,
     address: union(enum) {
         v1: u8,
         v2: u60,

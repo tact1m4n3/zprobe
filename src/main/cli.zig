@@ -25,12 +25,20 @@ pub const Command = union(CommandList) {
     };
 
     pub const Load = struct {
+        /// Owned
         elf_file: []const u8,
         speed: zprobe.Probe.Speed,
         chip: ChipTag,
         run_method: ?zprobe.flash.RunMethod,
         rtt: bool,
     };
+
+    pub fn deinit(command: Command, allocator: std.mem.Allocator) void {
+        switch (command) {
+            .load => |load_cmd| allocator.free(load_cmd.elf_file),
+            else => {},
+        }
+    }
 };
 
 pub fn parse_args(allocator: std.mem.Allocator) !?Command {
@@ -141,6 +149,8 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
                 try print_command_help(&writer.interface, "load");
                 return error.Missing_ELF;
             };
+            const elf_file_duped = try allocator.dupe(u8, elf_file);
+            errdefer allocator.free(elf_file_duped);
 
             const speed: zprobe.Probe.Speed = load_res.args.speed orelse .mhz(10);
 
@@ -158,7 +168,7 @@ pub fn parse_args(allocator: std.mem.Allocator) !?Command {
                 .chip = chip,
                 .run_method = run_method,
                 .rtt = load_res.args.rtt != 0,
-                .elf_file = elf_file,
+                .elf_file = elf_file_duped,
             } };
         },
     }

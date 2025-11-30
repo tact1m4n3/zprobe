@@ -19,6 +19,8 @@ pub fn main() !void {
     };
 
     if (try cli.parse_args(allocator)) |command| {
+        defer command.deinit(allocator);
+
         const stderr = std.fs.File.stderr();
         var stderr_writer_buf: [128]u8 = undefined;
         var stderr_writer = stderr.writer(&stderr_writer_buf);

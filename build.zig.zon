@@ -8,8 +8,8 @@
         "LICENSE",
         "README.md",
         "src",
-        "util",
         "flash_algorithms",
+        "util",
     },
     .dependencies = .{
         .libusb = .{
