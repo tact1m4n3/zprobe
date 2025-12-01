@@ -18,23 +18,38 @@ pub fn main() !void {
         else => std.heap.c_allocator,
     };
 
-    if (try cli.parse_args(allocator)) |command| {
-        defer command.deinit(allocator);
+    const command = cli.parse_args(allocator) catch |err| {
+        std.process.exit(switch (err) {
+            error.InvalidCommand,
+            error.MissingCommand,
+            error.InvalidRequest,
+            error.InvalidFormat,
+            error.MissingChip,
+            error.Missing_ELF,
+            error.InvalidSpeed,
+            error.InvalidChip,
+            error.InvalidRunMethod,
+            => 1,
+            else => return err,
+        });
+    } orelse {
+        return;
+    };
+    defer command.deinit(allocator);
 
-        const stderr = std.fs.File.stderr();
-        var stderr_writer_buf: [128]u8 = undefined;
-        var stderr_writer = stderr.writer(&stderr_writer_buf);
+    const stderr = std.fs.File.stderr();
+    var stderr_writer_buf: [128]u8 = undefined;
+    var stderr_writer = stderr.writer(&stderr_writer_buf);
 
-        try signal.init();
+    try signal.init();
 
-        var feedback: *Feedback = .init(&stderr_writer.interface, .elegant);
-        defer feedback.deinit();
+    var feedback: *Feedback = .init(&stderr_writer.interface, .elegant);
+    defer feedback.deinit();
 
-        main_impl(allocator, feedback, command) catch |err| {
-            feedback.fail();
-            return err;
-        };
-    }
+    main_impl(allocator, feedback, command) catch |err| {
+        feedback.fail();
+        return err;
+    };
 }
 
 fn main_impl(allocator: std.mem.Allocator, feedback: *Feedback, command: cli.Command) !void {
