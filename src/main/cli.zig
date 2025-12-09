@@ -181,6 +181,7 @@ pub const CommandList = enum {
 
 pub const ChipTag = enum {
     RP2040,
+    RP2350,
 };
 
 const command_descriptions = struct {

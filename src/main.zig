@@ -89,6 +89,7 @@ fn serialize_text(writer: *std.Io.Writer, data: anytype) !void {
 
 pub const AnyChip = union(cli.ChipTag) {
     RP2040: zprobe.chips.RP2040,
+    RP2350: zprobe.chips.RP2350,
 
     pub fn init(any_chip: *AnyChip, chip_tag: cli.ChipTag, probe: zprobe.Probe) !void {
         switch (chip_tag) {
