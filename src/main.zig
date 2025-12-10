@@ -136,11 +136,7 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
     var elf_info: zprobe.elf.Info = try .init(allocator, &elf_file_reader);
     defer elf_info.deinit(allocator);
 
-    // try feedback.update("Running system reset");
-    // try target.system_reset();
-
     try feedback.update("Loading image");
-
     zprobe.flash.load_elf(allocator, target, .{
         .elf_info = elf_info,
         .elf_file_reader = &elf_file_reader,
