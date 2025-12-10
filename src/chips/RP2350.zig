@@ -53,7 +53,7 @@ pub fn init(rp2350: *RP2350, probe: Probe) !void {
                     .size = 0x8000000,
                 },
                 .instructions = "8LUDr4ewFEZaTX1EKHgAKAfQXkh4RABogEddSHhEAGiARwEmLnBgHgMoANON4EhIAPAO+QxGAChf0UZIgBwA8Af5ACgB0AxGV+AGlBAiEHhBTE0oUdERIxh4dShN0RIgApAAeAIoCtABKEbRA5MEkgWRFCAAiBghCog4SQjgA5MEkgWRAPDU+BYgAogzSAQhkEczTAAoIkYA0AJGACgFmQSYA5sp0AB4LkxNKCXRGHh1KCLRApgAeAIoBZEBkgfQASga0RQgAIgYIQqIJkkF4ADwrvgWIAKII0gEIZBHI0wAKCJGANACRgAoBtAEkiBIAPCu+AxGACgC0CBGB7DwvRRIAPCl+AAondEDkQaYACgZ0AaYgEcFmIBHF0h4RAGZAWAWSHhEBpkBYBVIeEQEmQFgFEh4RARgE0h4RAOZAWAucAAk2ecFnNfnAPCr+MBGSUYAAENYAABSRQAQUkUAAFJFACBSUAAQUlAAAFJQACBGQwAAngIAAJQBAACIAQAAiAEAAIQBAACCAQAApAIAAKACAADQtQKvCEx8RCB4ASgK0QdIeEQAaIBHBkh4RABogEcAICBw0L0BINC9DgEAABQBAAAQAQAA0LUCrwlJeUQJeAEpDNEPIQkHQBgGSXlEDGgBIhEDEgTYI6BHACDQvQEg0L3aAAAA0gAAANC1Aq8LRglJeUQJeAEpCtEPIQkHQBgGSXlEDGgRRhpGoEcAINC9ASDQvcBGpAAAAKAAAAAGSF/0QEEBYDDuEPcE1EDsgAdA7IEHQL9wRwAAiO0A4NC1Aq+EshAgAHhNKA/RESAAeHUoC9ESIAB4AigL0AEoBdEUIACIGCEKiCFGCeABIAEHYRjQvf/30/8WIAKIBCEgRpBHAUZAQkhBACny0QEhSQfu54C1AK8A3v7eANTU1AAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                .init_fn = 0x1,
+                .init_fn = 1,
                 .uninit_fn = 405,
                 .program_page_fn = 509,
                 .erase_sector_fn = 457,
@@ -78,13 +78,23 @@ pub fn deinit(rp2040: *RP2350) void {
 }
 
 fn system_reset(target: *Target) Target.ResetError!void {
+    // NOTE: Currently broken. Leads to weird behaviour
     const rp2350: *RP2350 = @fieldParentPtr("target", target);
-    do_system_reset(rp2350) catch return error.ResetFailed;
+    for (0..10) |i| {
+        std.log.debug("attempt {} to reset RP2350", .{i});
+        do_system_reset(rp2350) catch {
+            std.log.info("failed to reset RP2350... attempt {}", .{i});
+            continue;
+        };
+        break;
+    } else return error.ResetFailed;
 }
 
 fn do_system_reset(rp2350: *RP2350) !void {
     const CTRL: u64 = 0;
     const RESCUE_RESTART: u32 = 0x8000_0000;
+
+    const backup_ctrl_stat = try rp2350.adi.dp_reg_read(.default, ADI.regs.dp.CTRL_STAT.addr);
 
     // reset system
     var ctrl = try rp2350.adi.ap_reg_read(RP_AP, CTRL);
@@ -94,6 +104,9 @@ fn do_system_reset(rp2350: *RP2350) !void {
 
     // after full chip reset, we should reinit adi and mem aps
     try rp2350.adi.reinit();
+
+    try rp2350.adi.dp_reg_write(.default, ADI.regs.dp.CTRL_STAT.addr, backup_ctrl_stat);
+
     try rp2350.core0_ap.reinit();
     try rp2350.core1_ap.reinit();
 
@@ -102,4 +115,7 @@ fn do_system_reset(rp2350: *RP2350) !void {
 
     // take the boot core out of rescue mode
     try rp2350.target.halt_reset(.boot);
+
+    var dummy_buf: [1]u32 = undefined;
+    try rp2350.target.memory.read_u32(0x2000_0000, &dummy_buf);
 }

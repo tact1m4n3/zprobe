@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.RTT_Host);
 
 const Timeout = @import("Timeout.zig");
 const Progress = @import("Progress.zig");
@@ -181,19 +182,29 @@ fn find_control_block(
         .blind => |blind_hint| switch (blind_hint) {
             .region => |region| return try find_control_block_in_range(target, region.start, region.size, timeout, maybe_progress),
             .first_n_kilobytes => |n| for (target.memory_map) |region| {
+                if (region.kind != .ram) continue;
                 if ((try find_control_block_in_range(target, region.offset, @min(n * 1024, region.length), timeout, maybe_progress))) |result| {
                     return result;
                 }
             } else return null,
         },
         .with_elf => |with_elf_hint| switch (with_elf_hint.method) {
-            .auto => for (with_elf_hint.elf_info.load_segments.items) |seg| {
-                const region_kind = target.find_memory_region_kind(seg.virtual_address, seg.memory_size) orelse continue;
-                if (region_kind != .ram) continue;
-                if ((try find_control_block_in_range(target, seg.virtual_address, seg.memory_size, timeout, maybe_progress))) |result| {
-                    return result;
+            .auto => {
+                if (try with_elf_hint.elf_info.get_symbol(with_elf_hint.elf_file_reader, "RttControlBlock")) |symbol| {
+                    if (try find_control_block_in_range(target, symbol.st_value, symbol.st_size, timeout, maybe_progress)) |result| {
+                        return result;
+                    }
                 }
-            } else return null,
+
+                var section_it = with_elf_hint.elf_info.sections.valueIterator();
+                while (section_it.next()) |section| {
+                    const region_kind = target.find_memory_region_kind(section.address, section.size) orelse continue;
+                    if (region_kind != .ram) continue;
+                    if ((try find_control_block_in_range(target, section.address, section.size, timeout, maybe_progress))) |result| {
+                        return result;
+                    }
+                } else return null;
+            },
             .section_name => |name| {
                 const section = with_elf_hint.elf_info.sections.get(name) orelse return null;
                 return find_control_block_in_range(target, section.address, section.size, timeout, maybe_progress);
