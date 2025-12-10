@@ -12,12 +12,11 @@ provide a probe-rs equivalent written in Zig, though it's currently a work in pr
 - **RTT (Real-Time Transfer)**: Stream real-time logs and debug output from running embedded
   applications
 - **Memory Operations**: Read and write memory at arbitrary addresses on target devices
-- **Multiple Run Methods**: Execute loaded binaries by calling the entry point or performing a
-  system reboot
 
 ### Supported Chips
 
 - RP2040 (Raspberry Pi Pico and compatible boards)
+- RP2350 (Raspberry Pi Pico 2 and compatible boards) (only arm for now)
 
 ### Supported Debug Interfaces
 
