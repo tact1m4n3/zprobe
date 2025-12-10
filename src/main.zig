@@ -104,10 +104,14 @@ fn serialize_text(writer: *std.Io.Writer, data: anytype) !void {
 
 pub const AnyChip = union(cli.ChipTag) {
     RP2040: zprobe.chips.RP2040,
+    RP2350: zprobe.chips.RP2350,
 
     pub fn init(any_chip: *AnyChip, chip_tag: cli.ChipTag, probe: zprobe.Probe) !void {
         switch (chip_tag) {
-            inline else => |tag| try @field(any_chip.*, @tagName(tag)).init(probe),
+            inline else => |tag| {
+                any_chip.* = @unionInit(AnyChip, @tagName(tag), undefined);
+                try @field(any_chip.*, @tagName(tag)).init(probe);
+            },
         }
     }
 
@@ -147,11 +151,7 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
     var elf_info: zprobe.elf.Info = try .init(allocator, &elf_file_reader);
     defer elf_info.deinit(allocator);
 
-    try feedback.update("Running system reset");
-    try target.system_reset();
-
     try feedback.update("Loading image");
-
     zprobe.flash.load_elf(allocator, target, .{
         .elf_info = elf_info,
         .elf_file_reader = &elf_file_reader,
@@ -172,7 +172,6 @@ fn load_impl(allocator: std.mem.Allocator, feedback: *Feedback, args: cli.Comman
             .location_hint = .{ .with_elf = .{
                 .elf_info = elf_info,
                 .elf_file_reader = &elf_file_reader,
-                .method = .auto,
             } },
         });
         defer rtt_host.deinit(allocator);

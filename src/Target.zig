@@ -68,7 +68,7 @@ pub fn is_halted(target: *Target, core_id: CoreId) !bool {
 pub fn halt(target: *Target, raw_core_mask: CoreMask) !void {
     const core_mask = raw_core_mask.apply_mask(target.valid_cores);
     try target.ensure_core_mask_attached(core_mask);
-    try target.debug.halt(core_mask);
+    try target.debug.halt(core_mask.subtract(target.halted_cores));
     target.halted_cores = target.halted_cores.combine(core_mask);
 }
 

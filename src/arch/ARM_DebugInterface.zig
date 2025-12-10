@@ -267,11 +267,12 @@ fn select_ap_and_ap_bank(adi: *ARM_DebugInterface, ap: AP_Address, address: u12)
             .v3 => |*current_select_v3| switch (ap.address) {
                 .v1 => |_| return error.AP_V1_NotSupported,
                 .v2 => |ap_addr| {
-                    const current_addr = current_select_v3.select.ADDR + @as(u60, current_select.v3.select1.ADDR) << 28;
-                    const expected_addr = ap_addr + address;
+                    const current_addr = (@as(u64, current_select_v3.select.ADDR) << 4) +
+                        (@as(u64, current_select.v3.select1.ADDR) << 32);
+                    const expected_addr = @as(u64, ap_addr) + address;
                     if (current_addr != expected_addr) {
-                        current_select_v3.select.ADDR = @truncate(expected_addr);
-                        current_select_v3.select1.ADDR = @truncate(expected_addr >> 28);
+                        current_select_v3.select.ADDR = @truncate(expected_addr >> 4);
+                        current_select_v3.select1.ADDR = @truncate(expected_addr >> 32);
                         should_update = true;
                     }
                 },
@@ -282,9 +283,9 @@ fn select_ap_and_ap_bank(adi: *ARM_DebugInterface, ap: AP_Address, address: u12)
             switch (current_select) {
                 .v1 => |current_select_v1| try adi.raw_reg_write(.dp, regs.dp.SELECT_V1.addr.offset, @bitCast(current_select_v1)),
                 .v3 => |*current_select_v3| {
-                    current_select_v3.select.DPBANKSEL = regs.dp.SELECT_V1.addr.bank.?;
-                    try adi.raw_reg_write(.dp, regs.dp.SELECT.addr, @bitCast(current_select_v3.select));
-                    try adi.raw_reg_write(.dp, regs.dp.SELECT_V1.addr.offset, @bitCast(current_select_v3.select1));
+                    current_select_v3.select.DPBANKSEL = regs.dp.SELECT1.addr.bank.?;
+                    try adi.raw_reg_write(.dp, regs.dp.SELECT_V3.addr.offset, @bitCast(current_select_v3.select));
+                    try adi.raw_reg_write(.dp, regs.dp.SELECT1.addr.offset, @bitCast(current_select_v3.select1));
                 },
             }
             active_dp.current_select = current_select;
@@ -612,10 +613,23 @@ pub const regs = struct {
 
     pub const ap = struct {
         pub const IDR = AP_Register(0xDFC, packed struct(u32) {
-            TYPE: u4,
+            TYPE: enum(u4) {
+                jtag = 0x0,
+                amba_ahb3_bus = 0x1,
+                amba_apb2_or_apb3_bus = 0x2,
+                amba_axi3_or_axi4_bus = 0x4,
+                amba_ahb5_bus = 0x5,
+                amba_apb4_or_apb5_bus = 0x6,
+                amba_axi5_bus = 0x7,
+                amba_ahb5_with_enhanced_hprot = 0x8,
+                _,
+            },
             VARIANT: u4,
             RES0: u5,
-            CLASS: u4,
+            CLASS: enum(u4) {
+                not_defined = 0b0000,
+                mem_ap = 0b1000,
+            },
             DESIGNER: u11,
             REVISION: u4,
         });

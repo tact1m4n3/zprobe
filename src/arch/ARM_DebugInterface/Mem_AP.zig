@@ -1,14 +1,14 @@
 const std = @import("std");
 
-const ARM_DebugInterface = @import("../ARM_DebugInterface.zig");
-const AP_Address = ARM_DebugInterface.AP_Address;
-const AP_Register = ARM_DebugInterface.AP_Register;
+const ADI = @import("../ARM_DebugInterface.zig");
+const AP_Address = ADI.AP_Address;
+const AP_Register = ADI.AP_Register;
 const Target = @import("../../Target.zig");
 const Memory = @import("../../Memory.zig");
 
 const Mem_AP = @This();
 
-adi: *ARM_DebugInterface,
+adi: *ADI,
 address: AP_Address,
 is_big_endian: bool,
 support_other_sizes: bool,
@@ -26,32 +26,31 @@ fn max_transfer_size(address: u64) usize {
     return (a + 1) * TAR_MAX_INCREMENT - address;
 }
 
-pub fn init(adi: *ARM_DebugInterface, ap_address: AP_Address) !Mem_AP {
-    const idr = try adi.ap_reg_read(ap_address, ARM_DebugInterface.regs.ap.IDR.addr);
-    if (idr == 0) return error.NoAP_Found;
+pub fn init(adi: *ADI, ap_address: AP_Address) !Mem_AP {
+    const idr = try ADI.regs.ap.IDR.read(adi, ap_address);
+    // TODO: is there a better way to check this?
+    if (@as(u32, @bitCast(idr)) == 0 or idr.CLASS != .mem_ap) return error.NoMem_AP_Found;
 
     const cfg = try regs.CFG.read(adi, ap_address);
 
-    const is_big_endian = cfg.BE == 1;
-    const support_large_address_ext = cfg.LA == 1;
-    const support_large_data_ext = cfg.LD == 1;
+    const is_big_endian = cfg.BE;
+    const support_large_address_ext = cfg.LA;
+    const support_large_data_ext = cfg.LD;
 
-    // We check if the AP supports other sizes than 32-bits by trying to set
-    // SIZE to something else. If it is read-only then the AP does not support
-    // other sizes.
-    try regs.CSW.modify(adi, ap_address, .{
-        .SIZE = .byte,
-        .AddrInc = .single,
-        .DbgSwEnable = 1,
-    });
+    const support_other_sizes = switch (idr.TYPE) {
+        .amba_ahb3_bus,
+        .amba_ahb5_bus,
+        .amba_ahb5_with_enhanced_hprot,
+        .amba_axi3_or_axi4_bus,
+        .amba_axi5_bus,
+        => true,
+        .amba_apb2_or_apb3_bus,
+        .amba_apb4_or_apb5_bus,
+        => false,
+        else => return error.Unexpected,
+    };
 
-    var csw = try regs.CSW.read(adi, ap_address);
-    const support_other_sizes = csw.SIZE == .byte;
-    csw.SIZE = .word; // default to word
-
-    try regs.CSW.write(adi, ap_address, csw);
-
-    return .{
+    var mem_ap: Mem_AP = .{
         .adi = adi,
         .address = ap_address,
         .is_big_endian = is_big_endian,
@@ -59,14 +58,39 @@ pub fn init(adi: *ARM_DebugInterface, ap_address: AP_Address) !Mem_AP {
         .support_large_address_ext = support_large_address_ext,
         .support_large_data_ext = support_large_data_ext,
     };
+
+    try mem_ap.reinit();
+
+    return mem_ap;
 }
 
 pub fn reinit(mem_ap: *Mem_AP) !void {
-    try regs.CSW.modify(mem_ap.adi, mem_ap.address, .{
-        .SIZE = mem_ap.current_access_size,
-        .AddrInc = .single,
-        .DbgSwEnable = 1,
-    });
+    const idr = try ADI.regs.ap.IDR.read(mem_ap.adi, mem_ap.address);
+    const csw = try regs.CSW.read(mem_ap.adi, mem_ap.address);
+    switch (idr.TYPE) {
+        .amba_ahb3_bus,
+        .amba_ahb5_with_enhanced_hprot,
+        => try regs.ahb3_ahb5_hprot.CSW.modify(mem_ap.adi, mem_ap.address, .{
+            .DbgSwEnable = true,
+            .SIZE = mem_ap.current_access_size,
+            .AddrInc = .single,
+            .HNONSEC = !csw.SDeviceEn,
+            .MasterType = true,
+            .Cacheable = true,
+            .Priviledged = true,
+            .Data = true,
+        }),
+        .amba_ahb5_bus => try regs.ahb5.CSW.modify(mem_ap.adi, mem_ap.address, .{
+            .DbgSwEnable = true,
+            .SIZE = mem_ap.current_access_size,
+            .AddrInc = .single,
+            .HNONSEC = !csw.SDeviceEn,
+            .MasterType = true,
+            .Priviledged = true,
+            .Data = true,
+        }),
+        else => return error.Unimplemented,
+    }
 }
 
 pub fn memory(mem_ap: *Mem_AP) Memory {
@@ -403,18 +427,18 @@ pub const regs = struct {
         SIZE: AccessSize,
         RES0: u1,
         AddrInc: AddressIncrement,
-        DeviceEn: u1,
-        TrInProg: u1,
+        DeviceEn: bool,
+        TrInProg: bool,
         Mode: u4,
         Type: u3,
-        MTE: u1,
-        ERRNPASS: u1,
-        ERRSTOP: u1,
+        MTE: bool,
+        ERRNPASS: bool,
+        ERRSTOP: bool,
         RES1: u3,
         RMEEN: u2,
-        SDeviceEn: u1,
+        SDeviceEn: bool,
         PROT: u7,
-        DbgSwEnable: u1,
+        DbgSwEnable: bool,
     });
 
     pub const TAR_LS = AP_Register(0xD04, packed struct(u32) {
@@ -430,9 +454,58 @@ pub const regs = struct {
     });
 
     pub const CFG = AP_Register(0xDF4, packed struct(u32) {
-        BE: u1,
-        LA: u1,
-        LD: u1,
+        BE: bool,
+        LA: bool,
+        LD: bool,
         RES0: u29,
     });
+
+    pub const ahb3_ahb5_hprot = struct {
+        pub const CSW = AP_Register(0xD00, packed struct(u32) {
+            SIZE: AccessSize,
+            RES0: u1,
+            AddrInc: AddressIncrement,
+            DeviceEn: bool,
+            TrInProg: bool,
+            Mode: u4,
+            Type: u3,
+            @"HPROT[6]": bool,
+            ERRNPASS: bool,
+            ERRSTOP: bool,
+            RES1: u5,
+            SDeviceEn: bool,
+            Data: bool, // HPROT[0]
+            Priviledged: bool, // HPROT[1]
+            Bufferable: bool, // HPROT[2]
+            Cacheable: bool, // HPROT[3]
+            Allocate: bool, // HPROT[4]
+            MasterType: bool,
+            HNONSEC: bool,
+            DbgSwEnable: bool,
+        });
+    };
+
+    pub const ahb5 = struct {
+        pub const CSW = AP_Register(0xD00, packed struct(u32) {
+            SIZE: AccessSize,
+            RES0: u1,
+            AddrInc: AddressIncrement,
+            DeviceEn: bool,
+            TrInProg: bool,
+            Mode: u4,
+            Type: u4,
+            ERRNPASS: bool,
+            ERRSTOP: bool,
+            RES1: u5,
+            SDeviceEn: bool,
+            Data: bool, // HPROT[0]
+            Priviledged: bool, // HPROT[1]
+            Bufferable: bool, // HPROT[2]
+            @"HPROT[3&4&6]": bool,
+            RES2: u1,
+            MasterType: bool,
+            HNONSEC: bool,
+            DbgSwEnable: bool,
+        });
+    };
 };

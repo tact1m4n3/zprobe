@@ -56,13 +56,13 @@ pub fn load_elf(
         .reboot => try target.reset(.all),
         .call_entry => {
             try target.write_register(.boot, .instruction_pointer, options.elf_info.header.entry);
-            try target.run(.boot);
+            try target.run(.all);
         },
     } else if (flash_only) {
         try target.reset(.all);
     } else if (ram_only) {
         try target.write_register(.boot, .instruction_pointer, options.elf_info.header.entry);
-        try target.run(.boot);
+        try target.run(.all);
     } else unreachable; // branch checked earlier
 }
 
@@ -150,6 +150,9 @@ pub const Loader = struct {
         target: *Target,
         options: LoadOptions,
     ) !void {
+        // Halt all cores since we are going to modify memory (if any are running)
+        try target.halt(.all);
+
         if (!options.ram_only) flash: {
             for (target.flash_algorithms) |algorithm| {
                 const flasher: Flasher = try .init(allocator, target, &algorithm);
@@ -322,6 +325,9 @@ pub const Flasher = struct {
     max_data_pages: u64,
 
     pub fn init(allocator: std.mem.Allocator, target: *Target, alg: *const Algorithm) !Flasher {
+        // Halt all cores since we are going to modify memory (if any are running)
+        try target.halt(.all);
+
         // Find ram to load the stub
         const load_region = ram_search: for (target.memory_map) |region| {
             if (region.kind == .ram) {
@@ -362,9 +368,6 @@ pub const Flasher = struct {
 
         // Calculate max transfer data size
         const max_data_pages = (load_region.offset + load_region.length - data_addr) / alg.page_size;
-
-        // Halt all cores since we are going to modify memory (if any are running)
-        try target.halt(.all);
 
         // Load header
         try target.memory.write_u32(load_addr, header);

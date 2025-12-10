@@ -125,7 +125,7 @@ pub const CoreMask = enum(u64) {
     }
 
     pub fn invert(self: CoreMask) CoreMask {
-        return ~@intFromEnum(self);
+        return @enumFromInt(~@intFromEnum(self));
     }
 };
 
